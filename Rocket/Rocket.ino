@@ -1,16 +1,16 @@
-#include <RadioLib.h>          // RadioLib for SX1262
-#include <Wire.h>              // I2C for BMP280
-#include <Adafruit_BMP280.h>   // BMP280 sensor library
-#include <math.h>              // For altitude calculation
+#include <RadioLib.h>         // RadioLib for SX1262
+#include <Wire.h>             // I2C for BMP280
+#include <Adafruit_BMP280.h>  // BMP280 sensor library
+#include <math.h>             // For altitude calculation
 
 // Heltec WiFi LoRa 32 V3 pin definitions for SX1262
-#define LORA_NSS 8   // Chip select
-#define LORA_SCK 9   // SPI clock
-#define LORA_MOSI 10 // SPI MOSI
-#define LORA_MISO 11 // SPI MISO
-#define LORA_RST 12  // Reset
-#define LORA_DIO1 14 // Interrupt (DIO1)
-#define LORA_BUSY 13 // Busy pin
+#define LORA_NSS 8    // Chip select
+#define LORA_SCK 9    // SPI clock
+#define LORA_MOSI 10  // SPI MOSI
+#define LORA_MISO 11  // SPI MISO
+#define LORA_RST 12   // Reset
+#define LORA_DIO1 14  // Interrupt (DIO1)
+#define LORA_BUSY 13  // Busy pin
 
 // BMP280 I2C pins
 #define I2C_SDA 41
@@ -23,7 +23,7 @@ SX1262 radio = new Module(LORA_NSS, LORA_DIO1, LORA_RST, LORA_BUSY);
 Adafruit_BMP280 bmp;
 
 // Reference pressure at 480 feet (146.3 m) above sea level
-#define P0 1007.49 // hPa, calculated for 480 feet
+#define P0 1007.49  // hPa, calculated for 480 feet
 
 // Buffer for telemetry data (10 samples)
 #define BUFFER_SIZE 10
@@ -35,30 +35,33 @@ struct Telemetry {
 } telemetryBuffer[BUFFER_SIZE];
 
 // Compression buffer (delta-encoded)
-uint8_t txBuffer[80]; // ~8 bytes/sample x 10 samples
+uint8_t txBuffer[80];  // ~8 bytes/sample x 10 samples
 uint8_t bufferIndex = 0;
 unsigned long lastSampleTime = 0;
 unsigned long lastTransmitTime = 0;
 bool isReceiving = false;
 
 // Transmission state
-enum TransmitState { STOPPED, RUNNING };
-TransmitState transmitState = STOPPED; // Start in STOPPED state
+enum TransmitState { STOPPED,
+                     RUNNING };
+TransmitState transmitState = STOPPED;  // Start in STOPPED state
 
 // LoRa settings
-#define FREQUENCY 915.0 // US band
+#define FREQUENCY 918.0  // US band
 #define SPREADING_FACTOR 7
-#define BANDWIDTH 250.0 // kHz
-#define CODING_RATE 6   // 4:6
-#define SYNC_WORD 0x34  // Public LoRa sync word
-#define POWER 22        // Max TX power (dBm)
+#define BANDWIDTH 250.0  // kHz
+#define CODING_RATE 6    // 4:6
+#define SYNC_WORD 0x34   // Public LoRa sync word
+#define POWER 22         // Max TX power (dBm)
+#define TXCO_VOLTAGE 1.8
+#define PREAMBLE_LENGTH 8
 
 // Calculate altitude relative to 480 feet
 float calculateAltitude(float pressure, float temperature) {
   // Hypsometric formula adjusted for 480 feet reference
   float ratio = P0 / pressure;
   float altitude = (pow(ratio, 0.19026) - 1.0) / 0.0000225577;
-  return altitude; // Meters above 480 feet
+  return altitude;  // Meters above 480 feet
 }
 
 void setup() {
@@ -81,11 +84,12 @@ void setup() {
   */
   // Initialize SX1262
   int state = radio.begin(FREQUENCY, BANDWIDTH, SPREADING_FACTOR, CODING_RATE,
-                          SYNC_WORD, POWER, 8, 1.8);
+                          SYNC_WORD, POWER, PREAMBLE_LENGTH, TXCO_VOLTAGE);
   if (state != RADIOLIB_ERR_NONE) {
     Serial.print(F("LoRa init failed, code "));
     Serial.println(state);
-    while (1);
+    while (1)
+      ;
   }
   Serial.println(F("LoRa init success!"));
 
@@ -151,13 +155,13 @@ void loop() {
       // Transmit over LoRa
       int state = radio.transmit(txBuffer, txIndex);
       if (state == RADIOLIB_ERR_NONE) {
-        Serial.println(F("Transmission successful"));
+        Serial.printf(F("Transmission successful. currentTime = %f\n"), currentTime % 65536);
       } else {
         Serial.print(F("Transmission failed, code "));
         Serial.println(state);
       }
 
-      bufferIndex = 0; // Reset buffer
+      bufferIndex = 0;  // Reset buffer
       lastTransmitTime = currentTime;
 
       // Switch to receive mode
@@ -168,7 +172,7 @@ void loop() {
 
   // Check for received control messages (8-bit integers)
   if (isReceiving) {
-    uint8_t rxBuffer[1]; // Expecting 1-byte control message
+    uint8_t rxBuffer[1];  // Expecting 1-byte control message
     int state = radio.receive(rxBuffer, 1);
     if (state == RADIOLIB_ERR_NONE) {
       Serial.print(F("Received control message: "));
@@ -178,24 +182,24 @@ void loop() {
       if (rxBuffer[0] == 1) {
         transmitState = RUNNING;
         Serial.println(F("Starting telemetry sampling and transmission"));
-        bufferIndex = 0; // Clear buffer
-        lastSampleTime = currentTime; // Reset sampling time
+        bufferIndex = 0;               // Clear buffer
+        lastSampleTime = currentTime;  // Reset sampling time
       } else if (rxBuffer[0] == 2) {
         transmitState = STOPPED;
         Serial.println(F("Stopping telemetry sampling and transmission"));
-        bufferIndex = 0; // Clear buffer
+        bufferIndex = 0;  // Clear buffer
       }
 
-      isReceiving = false; // Stop receiving until next cycle
+      isReceiving = false;  // Stop receiving until next cycle
     } else if (state == RADIOLIB_ERR_RX_TIMEOUT) {
       // No message received, check if time to transmit again (if RUNNING)
       if (transmitState == RUNNING && currentTime - lastTransmitTime >= 200) {
-        isReceiving = false; // Allow next transmission
+        isReceiving = false;  // Allow next transmission
       }
     } else {
       Serial.print(F("Receive error, code "));
       Serial.println(state);
-      isReceiving = false; // Reset to avoid getting stuck
+      isReceiving = false;  // Reset to avoid getting stuck
     }
   }
 }
