@@ -118,6 +118,30 @@ void loop() {
     newControlMessage = true;
     Serial.print(F("Received TCP control message: "));
     Serial.println(controlMessage);
+
+    // Attempt to send control message immediately if channel is clear
+    if (isReceiving) {
+      radio.standby(); // Stop receiving to scan channel
+      isReceiving = false;
+    }
+    int state = radio.scanChannel();
+    if (state == RADIOLIB_CHANNEL_CLEAR) {
+      state = radio.transmit(&controlMessage, 1);
+      if (state == RADIOLIB_ERR_NONE) {
+        Serial.print(F("Sent control message: "));
+        Serial.println(controlMessage);
+        newControlMessage = false; // Clear flag after sending
+      } else {
+        Serial.print(F("Control message failed, code "));
+        Serial.println(state);
+      }
+    } else {
+      Serial.println(F("Channel busy, retrying soon..."));
+      // Retry in next loop iteration (~10 ms delay)
+    }
+    radio.startReceive(); // Return to receive mode
+    isReceiving = true;
+    lastReceiveTime = currentTime;
   }
 
   // Receive LoRa telemetry
@@ -160,17 +184,40 @@ void loop() {
         lastAltitude = altitude;
       }
 
-      // Switch to transmit control message
-      isReceiving = false;
-      uint8_t messageToSend = newControlMessage ? controlMessage : 42; // Use TCP message or default
-      state = radio.transmit(&messageToSend, 1);
-      if (state == RADIOLIB_ERR_NONE) {
-        Serial.print(F("Sent control message: "));
-        Serial.println(messageToSend);
-        newControlMessage = false; // Clear flag after sending
+      // Send control message if one is pending and channel is clear
+      if (newControlMessage) {
+        radio.standby(); // Stop receiving to scan channel
+        isReceiving = false;
+        state = radio.scanChannel();
+        if (state == RADIOLIB_CHANNEL_CLEAR) {
+          state = radio.transmit(&controlMessage, 1);
+          if (state == RADIOLIB_ERR_NONE) {
+            Serial.print(F("Sent control message: "));
+            Serial.println(controlMessage);
+            newControlMessage = false; // Clear flag after sending
+          } else {
+            Serial.print(F("Control message failed, code "));
+            Serial.println(state);
+          }
+        } else {
+          Serial.println(F("Channel busy after telemetry, retrying soon..."));
+        }
       } else {
-        Serial.print(F("Control message failed, code "));
-        Serial.println(state);
+        // Send default control message (42) if no new message
+        uint8_t defaultMessage = 42;
+        state = radio.scanChannel();
+        if (state == RADIOLIB_CHANNEL_CLEAR) {
+          state = radio.transmit(&defaultMessage, 1);
+          if (state == RADIOLIB_ERR_NONE) {
+            Serial.print(F("Sent default control message: "));
+            Serial.println(defaultMessage);
+          } else {
+            Serial.print(F("Control message failed, code "));
+            Serial.println(state);
+          }
+        } else {
+          Serial.println(F("Channel busy for default message, skipping..."));
+        }
       }
 
       // Return to receive mode
