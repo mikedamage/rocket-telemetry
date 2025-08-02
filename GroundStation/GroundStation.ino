@@ -16,8 +16,8 @@
 #define BANDWIDTH 250.0 // kHz
 #define CODING_RATE 6   // 4:6
 #define SYNC_WORD 0x34  // Public LoRa sync word
-#define POWER 1 // dialed way down for bench testing
-// #define POWER 22        // Max TX power (dBm)
+// #define POWER 22         // Max TX power (22dBm == 158mW)
+#define POWER 3          // Low power for bench testing (3dBm == 2mW)
 #define TXCO_VOLTAGE 1.8
 #define PREAMBLE_LENGTH 8
 

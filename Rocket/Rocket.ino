@@ -3,6 +3,8 @@
 #include <Adafruit_BMP280.h>  // BMP280 sensor library
 #include <math.h>             // For altitude calculation
 
+#define PRINT_SIGNAL_STATS true
+
 // Heltec WiFi LoRa 32 V3 pin definitions for SX1262
 #define LORA_NSS 8    // Chip select
 #define LORA_SCK 9    // SPI clock
@@ -11,6 +13,17 @@
 #define LORA_RST 12   // Reset
 #define LORA_DIO1 14  // Interrupt (DIO1)
 #define LORA_BUSY 13  // Busy pin
+
+// LoRa settings
+#define FREQUENCY 918.0  // US band
+#define SPREADING_FACTOR 7
+#define BANDWIDTH 250.0  // kHz
+#define CODING_RATE 6    // 4:6
+#define SYNC_WORD 0x34   // Public LoRa sync word
+// #define POWER 22         // Max TX power (22dBm == 158mW)
+#define POWER 3          // Low power for bench testing (3dBm == 2mW)
+#define TXCO_VOLTAGE 1.8
+#define PREAMBLE_LENGTH 8
 
 // BMP280 I2C pins
 #define I2C_SDA 41
@@ -45,16 +58,58 @@ bool isReceiving = false;
 enum TransmitState { STOPPED,
                      RUNNING };
 TransmitState transmitState = STOPPED;  // Start in STOPPED state
+TransmitState prevTransmitState = STOPPED;
 
-// LoRa settings
-#define FREQUENCY 918.0  // US band
-#define SPREADING_FACTOR 7
-#define BANDWIDTH 250.0  // kHz
-#define CODING_RATE 6    // 4:6
-#define SYNC_WORD 0x34   // Public LoRa sync word
-#define POWER 22         // Max TX power (dBm)
-#define TXCO_VOLTAGE 1.8
-#define PREAMBLE_LENGTH 8
+volatile bool operationDone = false;
+volatile bool txDone = false;
+volatile bool rxDone = false;
+volatile bool rxTimeout = false;
+uint8_t controlMessage = 0;
+uint8_t rxBuffer[1]; // Expecting 1-byte control messages
+
+#if defined(ESP32)
+  ICACHE_RAM_ATTR
+#endif
+
+void onTxDone(void) {
+  txDone = true;
+}
+
+void onRxDone(void) {
+  rxDone = true;
+  int len = radio.getPacketLength();
+
+#if PRINT_SIGNAL_STATS
+  float snr = radio.getSNR();
+  float rssi = radio.getRSSI();
+  Serial.printf("LoRa packet received. SNR: %.4f, RSSI: %.4f\n", snr, rssi);
+#endif
+
+  if (len > 1) {
+    Serial.printf("Ignoring received packet > 1 byte (length: %d)\n", len);
+    return;
+  }
+
+  int state = radio.readData(rxBuffer, 1);
+
+  if (state == RADIOLIB_ERR_NONE) {
+    Serial.printf("Received control message: %d", rxBuffer[0]);
+    controlMessage = rxBuffer[0];
+  } else {
+    Serial.printf("Radio receive error %d\n", state);
+  }
+
+  isReceiving = false;
+}
+
+void onRxTimeout(void*) {
+  isReceiving = false;
+  rxTimeout = true;
+
+  if (prevTransmitState == RUNNING) {
+    transmitState = RUNNING;
+  }
+}
 
 // Calculate altitude relative to 480 feet
 float calculateAltitude(float pressure, float temperature) {
@@ -93,9 +148,12 @@ void setup() {
   }
   Serial.println(F("LoRa init success!"));
 
-  // Start in receive mode
-  radio.startReceive();
-  isReceiving = true;
+  radio.setDio1Action(onTxDone);
+  radio.setPacketReceivedAction(onRxDone);
+  // radio.setRxTimeoutAction(onRxTimeout);
+
+  // Listen for control message
+  Serial.println("Listening for control message...");
 }
 
 void loop() {
@@ -153,53 +211,62 @@ void loop() {
       }
 
       // Transmit over LoRa
-      int state = radio.transmit(txBuffer, txIndex);
-      if (state == RADIOLIB_ERR_NONE) {
-        Serial.printf(F("Transmission successful. currentTime = %f\n"), currentTime % 65536);
-      } else {
+      txDone = false;
+      int state = radio.startTransmit(txBuffer, txIndex);
+      if (state != RADIOLIB_ERR_NONE) {
         Serial.print(F("Transmission failed, code "));
         Serial.println(state);
+        // delay(10);
+        return;
       }
+
+      while (!txDone) {
+        delay(1);
+      }
+      Serial.println("Transmission successful");
 
       bufferIndex = 0;  // Reset buffer
       lastTransmitTime = currentTime;
 
-      // Switch to receive mode
-      radio.startReceive();
+      // Switch to receive mode for 10ms window
+      // prevTransmitState = RUNNING;
+      transmitState = STOPPED;
       isReceiving = true;
+      radio.startReceive();
+      delay(10);
+      radio.standby();
+      transmitState = RUNNING;
+      isReceiving = false;
     }
   }
 
-  // Check for received control messages (8-bit integers)
-  if (isReceiving) {
-    uint8_t rxBuffer[1];  // Expecting 1-byte control message
-    int state = radio.receive(rxBuffer, 1);
-    if (state == RADIOLIB_ERR_NONE) {
-      Serial.print(F("Received control message: "));
-      Serial.println(rxBuffer[0]);
+  radio.startReceive();
 
-      // Handle control messages
-      if (rxBuffer[0] == 1) {
+  // If an unprocessed control message is present, act on it
+  if (controlMessage > 0) {
+    switch (controlMessage) {
+      case 1:
         transmitState = RUNNING;
-        Serial.println(F("Starting telemetry sampling and transmission"));
-        bufferIndex = 0;               // Clear buffer
-        lastSampleTime = currentTime;  // Reset sampling time
-      } else if (rxBuffer[0] == 2) {
+        Serial.println("Starting telemetry sampling and transmission");
+        bufferIndex = 0;
+        lastSampleTime = currentTime;
+        radio.standby();
+        break;
+      case 2:
         transmitState = STOPPED;
-        Serial.println(F("Stopping telemetry sampling and transmission"));
-        bufferIndex = 0;  // Clear buffer
-      }
-
-      isReceiving = false;  // Stop receiving until next cycle
-    } else if (state == RADIOLIB_ERR_RX_TIMEOUT) {
-      // No message received, check if time to transmit again (if RUNNING)
-      if (transmitState == RUNNING && currentTime - lastTransmitTime >= 200) {
-        isReceiving = false;  // Allow next transmission
-      }
-    } else {
-      Serial.print(F("Receive error, code "));
-      Serial.println(state);
-      isReceiving = false;  // Reset to avoid getting stuck
+        prevTransmitState = STOPPED;
+        isReceiving = true;
+        radio.startReceive();
+        Serial.println("Stopping telemetry sampling and transmission");
+        break;
+      case 4:
+        Serial.println("TODO - Starting BLE beacon");
+        break;
     }
+
+    // reset control message and await another
+    controlMessage = 0;
+    rxDone = false;
+    radio.standby();
   }
 }
