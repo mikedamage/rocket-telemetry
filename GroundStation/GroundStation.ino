@@ -1,5 +1,9 @@
+#define HELTEC_NO_RADIOLIB
+#define ARDUINO_heltec_wifi_32_lora_V3
+
 #include <RadioLib.h>
 #include <WiFi.h>
+#include <heltec_unofficial.h>
 
 // Heltec WiFi LoRa 32 V3 pin definitions for SX1262
 #define LORA_NSS 8
@@ -42,20 +46,32 @@ WiFiClient tcpClient;
 WiFiServer tcpServer(tcpServerPort);
 WiFiClient tcpServerClient; // Client connected to the TCP server
 
-volatile bool isReceiving = true;
-volatile unsigned long lastReceiveTime = 0;
-uint8_t controlMessage = 0; // Default control message
-volatile bool newControlMessage = false; // Flag for new TCP control message
-uint8_t rxBuffer[80]; // 10 samples x 8 bytes
+// Radio state
+enum OperatingState {
+  STANDBY,
+  RECEIVING,
+  TRANSMITTING
+};
 
-void ICACHE_RAM_ATTR onPacketReceived(void) {
-  isReceiving = false;
-  int len = radio.getPacketLength();
-}
+OperatingState operatingState = STANDBY;
+volatile bool radioOperationPending = false;
+volatile bool transmitComplete = false;
+volatile bool receiveComplete = false;
+volatile bool channelScanComplete = false;
+volatile bool channelClear = false;
+uint8_t controlMessage = 0;
+unsigned long lastReceiveTime = 0;
+bool newControlMessage = false;
 
-void ICACHE_RAM_ATTR onTxComplete(void) {
-  newControlMessage = false;
-  Serial.println("Sent control message");
+// Callbacks
+ICACHE_RAM_ATTR void onDio1Action(void) {
+  if (operatingState == RECEIVING) {
+    receiveComplete = true;
+  } else if (operatingState == TRANSMITTING) {
+    transmitComplete = true;
+  }
+
+  radioOperationPending = false;
 }
 
 void setup() {
@@ -75,14 +91,14 @@ void setup() {
 
   // Connect to TCP client server (for telemetry)
   if (tcpClient.connect(tcpClientServerIP, tcpClientPort)) {
-    Serial.println(F("Connected to TCP client server"));
+    Serial.println(F("Connected to telemetry storage server"));
   } else {
     Serial.println(F("TCP client connection failed"));
   }
 
   // Start TCP server (for control messages)
   tcpServer.begin();
-  Serial.print(F("TCP server started on port "));
+  Serial.print(F("Control server listening on port "));
   Serial.println(tcpServerPort);
 
   // Initialize SX1262
@@ -92,15 +108,21 @@ void setup() {
     Serial.println(state);
     while (1);
   }
+  radio.setDio1Action(onDio1Action);
   Serial.println(F("LoRa init success!"));
-
-  //radio.setPacketReceivedAction(onPacketReceived);
 
   // Start receiving
   radio.startReceive();
+  if (state != RADIOLIB_ERR_NONE) {
+    Serial.print(F("Start receive failed, code "));
+    Serial.println(state);
+    while (1);
+  }
+  operatingState = RECEIVING;
 }
 
 void loop() {
+  int state;
   unsigned long currentTime = millis();
 
   // Reconnect WiFi if disconnected
@@ -117,11 +139,11 @@ void loop() {
 
   // Reconnect TCP client if disconnected
   if (!tcpClient.connected()) {
-    Serial.println(F("TCP client disconnected, reconnecting..."));
+    Serial.println(F("Telemetry storage server disconnected, reconnecting..."));
     if (tcpClient.connect(tcpClientServerIP, tcpClientPort)) {
-      Serial.println(F("Reconnected to TCP client server"));
+      Serial.println(F("Reconnected to telemetry storage server"));
     } else {
-      Serial.println(F("TCP client reconnection failed"));
+      Serial.println(F("Telemetry storage server reconnection failed"));
     }
   }
 
@@ -132,51 +154,54 @@ void loop() {
         tcpServerClient.stop(); // Close existing client
       }
       tcpServerClient = tcpServer.available();
-      Serial.println(F("New TCP server client connected"));
-  }
+      Serial.println(F("New control server client connected"));
+    }
   }
 
-  // Read control messages from TCP server client
+  // Read control messages from control server client
   if (tcpServerClient && tcpServerClient.connected() && tcpServerClient.available()) {
-    controlMessage = tcpServerClient.read(); // Read 8-bit integer
+    controlMessage = tcpServerClient.read();
     newControlMessage = true;
     Serial.print(F("Received TCP control message: "));
     Serial.println(controlMessage);
 
-    // Attempt to send control message immediately if channel is clear
-    if (isReceiving) {
-      radio.standby(); // Stop receiving to scan channel
-      isReceiving = false;
-    }
-
-    int state = radio.scanChannel();
-
-    if (state == RADIOLIB_CHANNEL_FREE) {
-      state = radio.transmit(&controlMessage, 1);
-
-      if (state == RADIOLIB_ERR_NONE) {
-        Serial.print(F("Sent control message: "));
-        Serial.println(controlMessage);
-        newControlMessage = false; // Clear flag after sending
-      } else {
-        Serial.print(F("Control message failed, code "));
-        Serial.println(state);
-      }
-    } else {
-      Serial.println(F("Channel busy, retrying soon..."));
-      // Retry in next loop iteration (~10 ms delay)
-    }
-    //radio.startReceive(); // Return to receive mode
-    isReceiving = true;
-    lastReceiveTime = currentTime;
   }
 
-  // Receive LoRa telemetry
-  if (isReceiving) {
-    int state = radio.startReceive(rxBuffer, 80);
+  if (!radioOperationPending && newControlMessage) {
+    Serial.println("transmitting control message");
+    operatingState = TRANSMITTING;
+    radioOperationPending = true;
+    state = radio.transmit(&controlMessage, 1);
+
+    if (state == RADIOLIB_ERR_NONE) {
+      Serial.println("transmission complete");
+      transmitComplete = true;
+      operatingState = RECEIVING;
+      radioOperationPending = false;
+      newControlMessage = false;
+    } else {
+      Serial.print(F("Start transmit failed, code "));
+      Serial.println(state);
+    }
+
+    state = radio.startReceive();
+    if (state == RADIOLIB_ERR_NONE) {
+      radioOperationPending = true;
+      operatingState = RECEIVING;
+    } else {
+      Serial.print(F("Start receive falsed, code "));
+      Serial.println(state);
+      radioOperationPending = false;
+      operatingState = STANDBY;
+    }
+  }
+
+  // Handle received telemetry
+  if (receiveComplete) {
+    uint8_t rxBuffer[80];
+    state = radio.readData(rxBuffer, 80);
     if (state == RADIOLIB_ERR_NONE) {
       Serial.println(F("Received telemetry packet!"));
-      // Decode delta-encoded data
       uint16_t lastPressure = 0, lastTimestamp = 0, lastAltitude = 0;
       int16_t lastTemperature = 0;
       for (int i = 0; i < 80; i += 8) {
@@ -190,14 +215,12 @@ void loop() {
         uint16_t timestamp = lastTimestamp + deltaTimestamp;
         uint16_t altitude = lastAltitude + deltaAltitude;
 
-        // Format telemetry as string
         char telemetryStr[100];
         snprintf(telemetryStr, sizeof(telemetryStr),
                  "Pressure=%.2f hPa, Temperature=%.1f °C, Timestamp=%u ms, Altitude=%.2f m\n",
                  pressure / 100.0, temperature / 10.0, timestamp, altitude / 100.0);
 
-        // Send to Serial and TCP client
-        //Serial.print(telemetryStr);
+        Serial.print(telemetryStr);
         if (tcpClient.connected()) {
           tcpClient.print(telemetryStr);
         } else {
@@ -209,12 +232,33 @@ void loop() {
         lastTimestamp = timestamp;
         lastAltitude = altitude;
       }
+    } else {
+      Serial.print(F("Receive error, code "));
+      Serial.println(state);
+      state = radio.startReceive();
+      if (state == RADIOLIB_ERR_NONE) {
+        operatingState = RECEIVING;
+        radioOperationPending = true;
+      } else {
+        Serial.print(F("Start receive failed, code "));
+        Serial.println(state);
+        radioOperationPending = false;
+      }
     }
+    receiveComplete = false;
   }
 
-  // Timeout to prevent getting stuck in receive mode
-  if (isReceiving && currentTime - lastReceiveTime >= 500) {
-    radio.startReceive(); // Restart receive
+  // Timeout to restart receive if stuck
+  if (radioOperationPending && currentTime - lastReceiveTime >= 500) {
+    int state = radio.startReceive();
+    if (state == RADIOLIB_ERR_NONE) {
+      operatingState = RECEIVING;
+      radioOperationPending = true;
+    } else {
+      Serial.print(F("Start receive failed, code "));
+      Serial.println(state);
+      radioOperationPending = false;
+    }
     lastReceiveTime = currentTime;
   }
 }
