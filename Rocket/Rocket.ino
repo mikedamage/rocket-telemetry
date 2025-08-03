@@ -52,7 +52,8 @@ TransmitState transmitState = STOPPED;  // Start in STOPPED state
 #define BANDWIDTH 250.0  // kHz
 #define CODING_RATE 6    // 4:6
 #define SYNC_WORD 0x34   // Public LoRa sync word
-#define POWER 22         // Max TX power (dBm)
+// #define POWER 22         // Max TX power (22 dBm == 158 mW)
+#define POWER 1 // Low power for bench testing (1 dBm == 1.3 mW)
 #define TXCO_VOLTAGE 1.8
 #define PREAMBLE_LENGTH 8
 
@@ -102,7 +103,7 @@ void loop() {
   unsigned long currentTime = millis();
 
   // Sample every 20 ms only if RUNNING
-  if (transmitState == RUNNING && currentTime - lastSampleTime >= 20) {
+  if (transmitState == RUNNING && currentTime - lastSampleTime >= 40) {
     /*
     // Read BMP280
     float pressure = bmp.readPressure() / 100.0; // hPa
@@ -155,7 +156,7 @@ void loop() {
       // Transmit over LoRa
       int state = radio.transmit(txBuffer, txIndex);
       if (state == RADIOLIB_ERR_NONE) {
-        Serial.printf(F("Transmission successful. currentTime = %f\n"), currentTime % 65536);
+        Serial.printf(F("Transmission successful. currentTime = %d\n"), (int)(currentTime % 65536));
       } else {
         Serial.print(F("Transmission failed, code "));
         Serial.println(state);
@@ -173,7 +174,7 @@ void loop() {
   // Check for received control messages (8-bit integers)
   if (isReceiving) {
     uint8_t rxBuffer[1];  // Expecting 1-byte control message
-    int state = radio.receive(rxBuffer, 1);
+    int state = radio.startReceive(rxBuffer, 1);
     if (state == RADIOLIB_ERR_NONE) {
       Serial.print(F("Received control message: "));
       Serial.println(rxBuffer[0]);
