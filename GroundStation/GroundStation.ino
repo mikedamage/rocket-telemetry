@@ -16,8 +16,8 @@
 #define BANDWIDTH 250.0 // kHz
 #define CODING_RATE 6   // 4:6
 #define SYNC_WORD 0x34  // Public LoRa sync word
-#define POWER 1 // dialed way down for bench testing
-// #define POWER 22        // Max TX power (dBm)
+#define POWER 1 // Low power for bench testing (1 dBm == 1.3 mW)
+// #define POWER 22        // Max TX power (22 dBm == 158 mW)
 #define TXCO_VOLTAGE 1.8
 #define PREAMBLE_LENGTH 8
 
@@ -42,10 +42,21 @@ WiFiClient tcpClient;
 WiFiServer tcpServer(tcpServerPort);
 WiFiClient tcpServerClient; // Client connected to the TCP server
 
-bool isReceiving = true;
-unsigned long lastReceiveTime = 0;
-uint8_t controlMessage = 42; // Default control message
-bool newControlMessage = false; // Flag for new TCP control message
+volatile bool isReceiving = true;
+volatile unsigned long lastReceiveTime = 0;
+uint8_t controlMessage = 0; // Default control message
+volatile bool newControlMessage = false; // Flag for new TCP control message
+uint8_t rxBuffer[80]; // 10 samples x 8 bytes
+
+void ICACHE_RAM_ATTR onPacketReceived(void) {
+  isReceiving = false;
+  int len = radio.getPacketLength();
+}
+
+void ICACHE_RAM_ATTR onTxComplete(void) {
+  newControlMessage = false;
+  Serial.println("Sent control message");
+}
 
 void setup() {
   Serial.begin(115200);
@@ -82,6 +93,8 @@ void setup() {
     while (1);
   }
   Serial.println(F("LoRa init success!"));
+
+  //radio.setPacketReceivedAction(onPacketReceived);
 
   // Start receiving
   radio.startReceive();
@@ -153,15 +166,14 @@ void loop() {
       Serial.println(F("Channel busy, retrying soon..."));
       // Retry in next loop iteration (~10 ms delay)
     }
-    radio.startReceive(); // Return to receive mode
+    //radio.startReceive(); // Return to receive mode
     isReceiving = true;
     lastReceiveTime = currentTime;
   }
 
   // Receive LoRa telemetry
   if (isReceiving) {
-    uint8_t rxBuffer[80]; // 10 samples x 8 bytes
-    int state = radio.receive(rxBuffer, 80);
+    int state = radio.startReceive(rxBuffer, 80);
     if (state == RADIOLIB_ERR_NONE) {
       Serial.println(F("Received telemetry packet!"));
       // Decode delta-encoded data
@@ -185,7 +197,7 @@ void loop() {
                  pressure / 100.0, temperature / 10.0, timestamp, altitude / 100.0);
 
         // Send to Serial and TCP client
-        Serial.print(telemetryStr);
+        //Serial.print(telemetryStr);
         if (tcpClient.connected()) {
           tcpClient.print(telemetryStr);
         } else {
