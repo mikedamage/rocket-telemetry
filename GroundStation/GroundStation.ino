@@ -4,6 +4,16 @@
 #include <RadioLib.h>
 #include <WiFi.h>
 #include <heltec_unofficial.h>
+#include <Preferences.h>
+#include <LittleFS.h>
+
+#include <AsyncTCP.h>
+#include <ESPAsyncWebServer.h>
+#include <ArduinoJson.h>
+#include <AsyncJson.h>
+
+#include <assert.h>
+
 
 // Heltec WiFi LoRa 32 V3 pin definitions for SX1262
 #define LORA_NSS 8
@@ -24,6 +34,17 @@
 // #define POWER 22        // Max TX power (22 dBm == 158 mW)
 #define TXCO_VOLTAGE 1.8
 #define PREAMBLE_LENGTH 8
+
+Preferences preferences;
+
+// Web server for viewing rocket data and sending control messages
+static AsyncWebServer webServer(80);
+
+// Async TCP client connection to telemetry storage server
+static AsyncClient telemetryForwarder;
+
+// number of forwarded telemetry bytes awaiting an ACK
+static size_t waitingAck = 0;
 
 // WiFi credentials
 const char* ssid = "***REMOVED***";         // Replace with your WiFi SSID
@@ -46,14 +67,22 @@ WiFiClient tcpClient;
 WiFiServer tcpServer(tcpServerPort);
 WiFiClient tcpServerClient; // Client connected to the TCP server
 
+enum TelemetryForwarderState {
+  DISCONNECTED,
+  CONNECTING,
+  CONNECTED
+};
+TelemetryForwarderState telemetryForwarderState = DISCONNECTED;
+
 // Radio state
 enum OperatingState {
   STANDBY,
   RECEIVING,
   TRANSMITTING
 };
-
 OperatingState operatingState = STANDBY;
+
+volatile bool shouldRestart = false;
 volatile bool radioOperationPending = false;
 volatile bool transmitComplete = false;
 volatile bool receiveComplete = false;
@@ -78,6 +107,10 @@ void setup() {
   Serial.begin(115200);
   delay(1000);
 
+  LittleFS.begin();
+  shouldRestart = false;
+  preferences.begin("ground-station", false);
+
   // Initialize WiFi
   Serial.print(F("Connecting to WiFi: "));
   Serial.println(ssid);
@@ -96,10 +129,14 @@ void setup() {
     Serial.println(F("TCP client connection failed"));
   }
 
+
   // Start TCP server (for control messages)
-  tcpServer.begin();
-  Serial.print(F("Control server listening on port "));
-  Serial.println(tcpServerPort);
+  // tcpServer.begin();
+  // Serial.print(F("Control server listening on port "));
+  // Serial.println(tcpServerPort);
+
+  setupTelemetryForwarder();
+  startWebServer();
 
   // Initialize SX1262
   int state = radio.begin(FREQUENCY, BANDWIDTH, SPREADING_FACTOR, CODING_RATE, SYNC_WORD, POWER, PREAMBLE_LENGTH, TXCO_VOLTAGE);
@@ -121,9 +158,109 @@ void setup() {
   operatingState = RECEIVING;
 }
 
+void setupTelemetryForwarder() {
+  telemetryForwarder.onDisconnect([](void *arg, AsyncClient *client) {
+    Serial.println("disconnected from telemetry server");
+    telemetryForwarderState = DISCONNECTED;
+  });
+
+  telemetryForwarder.onError([](void *arg, AsyncClient *client, int8_t error) {
+    Serial.printf("telemetry forwarder error: %s\n", client->errorToString(error));
+  });
+
+  telemetryForwarder.onData([](void *arg, AsyncClient *client, void *data, size_t len) {
+    Serial.printf("received %u bytes from telemetry server\n", len);
+    Serial.write((uint8_t *)data, len);
+  });
+
+  telemetryForwarder.onConnect([](void *arg, AsyncClient *client) {
+    Serial.printf("connected to telemetry storage server");
+    telemetryForwarderState = CONNECTED;
+  });
+
+  telemetryForwarder.onAck([](void *arg, AsyncClient *client, size_t len, uint32_t time) {
+    Serial.printf("Acked %u bytes in %" PRIu32 " ms\n", len, time);
+    assert(waitingAck >= len);
+    waitingAck -= len;
+  });
+
+  telemetryForwarder.setRxTimeout(20000);
+  telemetryForwarder.setNoDelay(true);
+}
+
+void startWebServer() {
+  webServer.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
+    request->redirect("/index.html");
+  });
+
+  webServer.serveStatic("/index.html", LittleFS, "/index.html");
+  webServer.serveStatic("/js", LittleFS, "/js");
+  webServer.serveStatic("/css", LittleFS, "/css");
+
+  webServer.on("/control_messages", HTTP_POST, [](AsyncWebServerRequest *request) {
+    request->send(400, "text/plain", "message required");
+
+    if (request->hasParam("message")) {
+      Serial.printf("received new control message via web: %s", request->getParam("message")->value().c_str());
+      controlMessage = (uint8_t)request->getParam("message")->value().toInt();
+      newControlMessage = true;
+      request->send(200, "text/plain", "message queued for transmission to rocket");
+    }
+  });
+
+  // Get ground station config
+  webServer.on("/config", HTTP_GET, [](AsyncWebServerRequest *request) {
+    AsyncJsonResponse *response = new AsyncJsonResponse();
+    JsonObject root = response->getRoot().to<JsonObject>();
+    String telemetryHost = preferences.getString("telemetryHost", "192.168.1.249");
+    uint32_t telemetryPort = preferences.getUInt("telemetryPort", 5150);
+
+    root["telemetryHost"] = telemetryHost;
+    root["telemetryPort"] = telemetryPort;
+    response->setLength();
+    request->send(response);
+  });
+
+  // Update ground station config
+  AsyncCallbackJsonWebHandler* configPutHandler = new AsyncCallbackJsonWebHandler("/config");
+
+  configPutHandler->setMethod(HTTP_POST | HTTP_PUT);
+  configPutHandler->onRequest([](AsyncWebServerRequest *request, JsonVariant &json) {
+    AsyncJsonResponse *response = new AsyncJsonResponse();
+    Serial.print("telemetry server address update: ");
+    serializeJson(json, Serial);
+    Serial.println();
+
+    JsonObject jsonObj = json.as<JsonObject>();
+
+    if (jsonObj["telemetryHost"]) {
+      preferences.putString("telemetryHost", jsonObj["telemetryHost"].as<String>());
+    }
+
+    if (jsonObj["telemetryPort"]) {
+      preferences.putUInt("telemetryPort", jsonObj["telemetryPort"].as<uint32_t>());
+    }
+
+    request->send(200);
+  });
+  webServer.addHandler(configPutHandler);
+
+
+  webServer.on("/restart", HTTP_POST, [](AsyncWebServerRequest *request) {
+    request->send(200, "text/plain", "restarting on next loop iteration");
+    shouldRestart = true;
+  });
+
+  webServer.begin();
+}
+
 void loop() {
   int state;
   unsigned long currentTime = millis();
+
+  if (shouldRestart) {
+    ESP.restart();
+  }
 
   // Reconnect WiFi if disconnected
   if (WiFi.status() != WL_CONNECTED) {
