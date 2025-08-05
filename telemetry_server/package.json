@@ -1,0 +1,14 @@
+{
+  "name": "telemetry-server",
+  "type": "module",
+  "version": "0.1.0",
+  "description": "Stores telemetry sent via TCP as a local CSV file",
+  "author": "Mike Green <mike.is.green@gmail.com>",
+  "dependencies": {
+    "csv": "^6.4.1",
+    "yargs": "^18.0.0"
+  },
+  "scripts": {
+    "start": "node ./server.js"
+  }
+}
