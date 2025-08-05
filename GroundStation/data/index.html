@@ -21,19 +21,39 @@
       </section>
 
       <section id="telemetry-settings">
-        <h2>Telemetry Storage Server</h2>
-        <form id="telemetry-settings-form">
-          <div>
-            <label for="telemetry-server-host">Host IP:</label>
-            <input type="text" pattern="^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}" id="telemetry-server-host" />
-          </div>
-          <div>
-            <label for="telemetry-server-port">Host IP:</label>
-            <input id="telemetry-server-port" type="number" min="1" max="65535" step="1" required />
-          </div>
+        <h2>Settings</h2>
+        <form id="settings-form">
+          <fieldset>
+            <legend>Telemetry Endpoint</legend>
+            <div class="field">
+              <label for="telemetry-server-host">Host IP:</label>
+              <input
+                type="text"
+                pattern="^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}"
+                id="telemetry-server-host"
+                placeholder="xxx.xxx.xxx.xxx"
+              />
+            </div>
+            <div class="field">
+              <label for="telemetry-server-port">Host Port:</label>
+              <input id="telemetry-server-port" type="number" min="1" max="65535" step="1" required />
+            </div>
+          </fieldset>
+          <fieldset>
+            <legend>WiFi Network</legend>
+            <div class="field">
+              <label for="wifi-ssid">SSID:</label>
+              <input type="text" required id="wifi-ssid" />
+            </div>
+            <div class="field">
+              <label for="wifi-psk">WiFi Password:</label>
+              <input type="password" required id="wifi-psk" />
+            </div>
+          </fieldset>
           <button class="save">Update</button>
           <div class="status"></div>
         </form>
+        <button id="restart" type="button">Restart ESP32</button>
       </section>
     </main>
 
