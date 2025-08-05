@@ -35,6 +35,10 @@
 #define TXCO_VOLTAGE 1.8
 #define PREAMBLE_LENGTH 8
 
+#define MAX_TCP_CLIENTS CONFIG_LWIP_MAX_ACTIVE_TCP
+
+size_t clientPermits = MAX_TCP_CLIENTS;
+
 Preferences preferences;
 
 // Web server for viewing rocket data and sending control messages
@@ -51,8 +55,8 @@ const char* ssid = "***REMOVED***";         // Replace with your WiFi SSID
 const char* password = "***REMOVED***"; // Replace with your WiFi password
 
 // TCP client settings (for forwarding telemetry)
-const char* tcpClientServerIP = "192.168.1.249"; // Replace with telemetry server IP
-const uint16_t tcpClientPort = 5150;             // Replace with telemetry server port
+// const char* tcpClientServerIP = "192.168.1.249"; // Replace with telemetry server IP
+// const uint16_t tcpClientPort = 5150;             // Replace with telemetry server port
 
 // TCP server settings (for receiving control messages)
 const uint16_t tcpServerPort = 5151; // Port for control message server
@@ -61,7 +65,7 @@ const uint16_t tcpServerPort = 5151; // Port for control message server
 SX1262 radio = new Module(LORA_NSS, LORA_DIO1, LORA_RST, LORA_BUSY);
 
 // WiFi client (for forwarding telemetry)
-WiFiClient tcpClient;
+// WiFiClient tcpClient;
 
 // WiFi server (for receiving control messages)
 WiFiServer tcpServer(tcpServerPort);
@@ -92,8 +96,8 @@ uint8_t controlMessage = 0;
 unsigned long lastReceiveTime = 0;
 bool newControlMessage = false;
 
-// Callbacks
-ICACHE_RAM_ATTR void onDio1Action(void) {
+// Radio TX/RX callback
+void IRAM_ATTR onDio1Action(void) {
   if (operatingState == RECEIVING) {
     receiveComplete = true;
   } else if (operatingState == TRANSMITTING) {
@@ -101,6 +105,46 @@ ICACHE_RAM_ATTR void onDio1Action(void) {
   }
 
   radioOperationPending = false;
+}
+
+void forwardTelemetry(String telemetryStr, int attempts = 0) {
+  if (!clientPermits) {
+    if (attempts > 4) {
+      Serial.println("Tried 5 times to send telemetry. Giving up.");
+      return;
+    }
+
+    Serial.println("No more available tcp client slots. Retrying...");
+    delay(5);
+    forwardTelemetry(telemetryStr, attempts + 1);
+    return;
+  }
+
+  AsyncClient *client = new AsyncClient();
+
+  client->onError([](void *arg, AsyncClient *client, int8_t error) {
+    Serial.printf("** TCP error occurred %s\n", client->errorToString(error));
+    client->close(true);
+    delete client;
+  });
+
+  client->onConnect([clientPermits, telemetryStr](void *arg, AsyncClient *client) {
+    clientPermits--;
+    Serial.printf("forwarding telemetry: %" PRIu16 "\n", client->localPort());
+
+    client->onDisconnect([clientPermits](void *arg, AsyncClient *client) {
+      Serial.printf("disconnect client: %" PRIu16 "\n", client->localPort());
+      client->close(true);
+      delete client;
+      clientPermits++;
+    });
+
+    client->write(telemetryStr.c_str());
+  });
+
+  if (!client->connect(preferences.getString("telemetryHost").c_str(), preferences.getUInt("telemetryPort"))) {
+    Serial.println("** connection to telemetry server failed **");
+  }
 }
 
 void setup() {
@@ -123,11 +167,11 @@ void setup() {
   Serial.println(WiFi.localIP());
 
   // Connect to TCP client server (for telemetry)
-  if (tcpClient.connect(tcpClientServerIP, tcpClientPort)) {
-    Serial.println(F("Connected to telemetry storage server"));
-  } else {
-    Serial.println(F("TCP client connection failed"));
-  }
+  // if (tcpClient.connect(tcpClientServerIP, tcpClientPort)) {
+  //   Serial.println(F("Connected to telemetry storage server"));
+  // } else {
+  //   Serial.println(F("TCP client connection failed"));
+  // }
 
 
   // Start TCP server (for control messages)
@@ -201,7 +245,7 @@ void startWebServer() {
     request->send(400, "text/plain", "message required");
 
     if (request->hasParam("message")) {
-      Serial.printf("received new control message via web: %s", request->getParam("message")->value().c_str());
+      Serial.printf("received new control message via web: %s\n", request->getParam("message")->value().c_str());
       controlMessage = (uint8_t)request->getParam("message")->value().toInt();
       newControlMessage = true;
       request->send(200, "text/plain", "message queued for transmission to rocket");
@@ -214,9 +258,13 @@ void startWebServer() {
     JsonObject root = response->getRoot().to<JsonObject>();
     String telemetryHost = preferences.getString("telemetryHost", "192.168.1.249");
     uint32_t telemetryPort = preferences.getUInt("telemetryPort", 5150);
+    String wifiSSID = preferences.getString("wifiSSID", "");
+    String wifiPSK = preferences.getString("wifiPSK", "");
 
     root["telemetryHost"] = telemetryHost;
     root["telemetryPort"] = telemetryPort;
+    root["wifiSSID"] = wifiSSID;
+    root["wifiPSK"] = wifiPSK;
     response->setLength();
     request->send(response);
   });
@@ -239,6 +287,14 @@ void startWebServer() {
 
     if (jsonObj["telemetryPort"]) {
       preferences.putUInt("telemetryPort", jsonObj["telemetryPort"].as<uint32_t>());
+    }
+
+    if (jsonObj["wifiSSID"]) {
+      preferences.putString("wifiSSID", jsonObj["wifiSSID"].as<String>());
+    }
+
+    if (jsonObj["wifiPSK"]) {
+      preferences.putString("wifiPSK", jsonObj["wifiPSK"].as<String>());
     }
 
     request->send(200);
@@ -271,19 +327,20 @@ void loop() {
       Serial.print(F("."));
     }
     Serial.println(F("\nWiFi reconnected"));
-    tcpServer.begin(); // Restart TCP server
+    // tcpServer.begin(); // Restart TCP server
   }
 
   // Reconnect TCP client if disconnected
-  if (!tcpClient.connected()) {
-    Serial.println(F("Telemetry storage server disconnected, reconnecting..."));
-    if (tcpClient.connect(tcpClientServerIP, tcpClientPort)) {
-      Serial.println(F("Reconnected to telemetry storage server"));
-    } else {
-      Serial.println(F("Telemetry storage server reconnection failed"));
-    }
-  }
+  // if (!tcpClient.connected()) {
+  //   Serial.println(F("Telemetry storage server disconnected, reconnecting..."));
+  //   if (tcpClient.connect(tcpClientServerIP, tcpClientPort)) {
+  //     Serial.println(F("Reconnected to telemetry storage server"));
+  //   } else {
+  //     Serial.println(F("Telemetry storage server reconnection failed"));
+  //   }
+  // }
 
+  /*
   // Check for new TCP server clients
   if (tcpServer.hasClient()) {
     if (!tcpServerClient || !tcpServerClient.connected()) {
@@ -294,7 +351,9 @@ void loop() {
       Serial.println(F("New control server client connected"));
     }
   }
+  */
 
+  /*
   // Read control messages from control server client
   if (tcpServerClient && tcpServerClient.connected() && tcpServerClient.available()) {
     controlMessage = tcpServerClient.read();
@@ -303,6 +362,7 @@ void loop() {
     Serial.println(controlMessage);
 
   }
+  */
 
   if (!radioOperationPending && newControlMessage) {
     Serial.println("transmitting control message");
@@ -312,9 +372,8 @@ void loop() {
 
     if (state == RADIOLIB_ERR_NONE) {
       Serial.println("transmission complete");
-      transmitComplete = true;
+      transmitComplete = false;
       operatingState = RECEIVING;
-      radioOperationPending = false;
       newControlMessage = false;
     } else {
       Serial.print(F("Start transmit failed, code "));
@@ -352,17 +411,20 @@ void loop() {
         uint16_t timestamp = lastTimestamp + deltaTimestamp;
         uint16_t altitude = lastAltitude + deltaAltitude;
 
+        // Encode telemetry as CSV:
+        // timestamp millis, pressure hPa, temperature celsius, altitude meters
         char telemetryStr[100];
         snprintf(telemetryStr, sizeof(telemetryStr),
-                 "Pressure=%.2f hPa, Temperature=%.1f °C, Timestamp=%u ms, Altitude=%.2f m\n",
-                 pressure / 100.0, temperature / 10.0, timestamp, altitude / 100.0);
+                 "\"%u\",\"%.2f hPa\",\"%.1f °C\",\"%.2f m\"\n",
+                 timestamp, pressure / 100.0, temperature / 10.0, altitude / 100.0);
 
         Serial.print(telemetryStr);
-        if (tcpClient.connected()) {
-          tcpClient.print(telemetryStr);
-        } else {
-          Serial.println(F("TCP client not connected, skipping send"));
-        }
+        forwardTelemetry(telemetryStr);
+        // if (tcpClient.connected()) {
+        //   tcpClient.print(telemetryStr);
+        // } else {
+        //   Serial.println(F("TCP client not connected, skipping send"));
+        // }
 
         lastPressure = pressure;
         lastTemperature = temperature;
@@ -399,3 +461,4 @@ void loop() {
     lastReceiveTime = currentTime;
   }
 }
+
