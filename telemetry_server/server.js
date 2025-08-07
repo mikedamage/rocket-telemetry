@@ -67,6 +67,7 @@ server.on("error", (err) => {
   console.error(err);
 });
 
+/*
 process.on("SIGINT", () => {
   console.log("Waiting for active connections to close");
 
@@ -75,6 +76,7 @@ process.on("SIGINT", () => {
     process.exit();
   });
 });
+*/
 
 server.listen(argv.port, "0.0.0.0", () => {
   log(`starting server on port ${argv.port}`);
