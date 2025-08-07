@@ -1,10 +1,10 @@
-console.log("hello main.js");
-
 let statusTimeout;
 const buttons = document.querySelectorAll("#control-messages button");
 const settingsForm = document.querySelector("#settings-form");
 const formStatus = settingsForm.querySelector(".status");
 const restartButton = document.querySelector("#restart");
+const disconnectTelemetry = document.querySelector("#disconnect-telemetry");
+const connectTelemetry = document.querySelector("#connect-telemetry");
 
 const controlCodes = {
   startTelemetry: 1,
@@ -41,6 +41,7 @@ function flashStatus(message, timeoutSeconds = 10) {
   statusMessage.innerHTML = message;
   statusTimeout = setTimeout(() => {
     statusMessage.innerHTML = "";
+    statusTimeout = null;
   }, timeoutSeconds * 1000);
 }
 
@@ -113,6 +114,40 @@ restartButton.addEventListener(
     if (!res.ok) {
       console.error("Received error response: %O", res);
     }
+  },
+  false
+);
+
+disconnectTelemetry.addEventListener(
+  "click",
+  async (evt) => {
+    evt.preventDefault();
+
+    const res = await fetch("/telemetry_endpoint", { method: "delete" });
+
+    if (!res.ok) {
+      console.error("Received error response: %O", res);
+      return;
+    }
+
+    flashStatus("Disconnecting from telemetry endpoint");
+  },
+  false
+);
+
+connectTelemetry.addEventListener(
+  "click",
+  async (evt) => {
+    evt.preventDefault();
+
+    const res = await fetch("/telemetry_endpoint", { method: "post" });
+
+    if (!res.ok) {
+      console.error("received error response: %O", res);
+      return;
+    }
+
+    flashStatus("Connecting to configured telemetry endpoint");
   },
   false
 );
