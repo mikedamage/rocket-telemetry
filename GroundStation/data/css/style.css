@@ -1,0 +1,26 @@
+body {
+  font-family: Arial, sans-serif;
+}
+
+main,
+header {
+  max-width: 80vw;
+  margin: 0 auto;
+}
+
+fieldset {
+  margin-bottom: 2em;
+  padding: 0.8em;
+}
+
+.field {
+  margin-bottom: 1em;
+}
+
+.field:last-of-type {
+  margin-bottom: 0;
+}
+
+label {
+  display: block;
+}

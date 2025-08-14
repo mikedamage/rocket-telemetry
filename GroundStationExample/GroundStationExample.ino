@@ -11,15 +11,15 @@
 #define LORA_BUSY 13
 
 // WiFi credentials
-const char* ssid = "YOUR_SSID";         // Replace with your WiFi SSID
-const char* password = "YOUR_PASSWORD"; // Replace with your WiFi password
+const char* ssid = "YOUR_SSID";
+const char* password = "YOUR_PASSWORD";
 
 // TCP client settings (for forwarding telemetry)
-const char* tcpClientServerIP = "192.168.1.100"; // Replace with telemetry server IP
-const uint16_t tcpClientPort = 5000;             // Replace with telemetry server port
+const char* tcpClientServerIP = "192.168.1.100";
+const uint16_t tcpClientPort = 5000;
 
 // TCP server settings (for receiving control messages)
-const uint16_t tcpServerPort = 5001; // Port for control message server
+const uint16_t tcpServerPort = 5001;
 
 // LoRa module instance
 SX1262 radio = new Module(LORA_NSS, LORA_DIO1, LORA_RST, LORA_BUSY);
@@ -29,12 +29,16 @@ WiFiClient tcpClient;
 
 // WiFi server (for receiving control messages)
 WiFiServer tcpServer(tcpServerPort);
-WiFiClient tcpServerClient; // Client connected to the TCP server
+WiFiClient tcpServerClient;
 
-bool isReceiving = true;
-unsigned long lastReceiveTime = 0;
-uint8_t controlMessage = 42; // Default control message
-bool newControlMessage = false; // Flag for new TCP control message
+// Radio state
+volatile bool radioOperationPending = false;
+volatile bool transmitComplete = false;
+volatile bool receiveComplete = false;
+volatile bool channelScanComplete = false;
+volatile bool channelClear = false;
+uint8_t controlMessage = 42;
+bool newControlMessage = false;
 
 void setup() {
   Serial.begin(115200);
@@ -51,14 +55,14 @@ void setup() {
   Serial.println(F("\nWiFi connected! IP: "));
   Serial.println(WiFi.localIP());
 
-  // Connect to TCP client server (for telemetry)
+  // Connect to TCP client server
   if (tcpClient.connect(tcpClientServerIP, tcpClientPort)) {
     Serial.println(F("Connected to TCP client server"));
   } else {
     Serial.println(F("TCP client connection failed"));
   }
 
-  // Start TCP server (for control messages)
+  // Start TCP server
   tcpServer.begin();
   Serial.print(F("TCP server started on port "));
   Serial.println(tcpServerPort);
@@ -70,10 +74,35 @@ void setup() {
     Serial.println(state);
     while (1);
   }
+  radio.setPacketSentAction(onPacketSent);
+  radio.setPacketReceivedAction(onPacketReceived);
+  radio.setDio1Action(onChannelScan);
   Serial.println(F("LoRa init success!"));
 
   // Start receiving
-  radio.startReceive();
+  state = radio.startReceive();
+  if (state != RADIOLIB_ERR_NONE) {
+    Serial.print(F("Start receive failed, code "));
+    Serial.println(state);
+    while (1);
+  }
+  radioOperationPending = true;
+}
+
+// Callbacks
+void onPacketSent() {
+  transmitComplete = true;
+  radioOperationPending = false;
+}
+
+void onPacketReceived() {
+  receiveComplete = true;
+  radioOperationPending = false;
+}
+
+void onChannelScan() {
+  channelScanComplete = true;
+  radioOperationPending = false;
 }
 
 void loop() {
@@ -88,7 +117,7 @@ void loop() {
       Serial.print(F("."));
     }
     Serial.println(F("\nWiFi reconnected"));
-    tcpServer.begin(); // Restart TCP server
+    tcpServer.begin();
   }
 
   // Reconnect TCP client if disconnected
@@ -105,7 +134,7 @@ void loop() {
   if (tcpServer.hasClient()) {
     if (!tcpServerClient || !tcpServerClient.connected()) {
       if (tcpServerClient) {
-        tcpServerClient.stop(); // Close existing client
+        tcpServerClient.stop();
       }
       tcpServerClient = tcpServer.available();
       Serial.println(F("New TCP server client connected"));
@@ -114,43 +143,86 @@ void loop() {
 
   // Read control messages from TCP server client
   if (tcpServerClient && tcpServerClient.connected() && tcpServerClient.available()) {
-    controlMessage = tcpServerClient.read(); // Read 8-bit integer
+    controlMessage = tcpServerClient.read();
     newControlMessage = true;
     Serial.print(F("Received TCP control message: "));
     Serial.println(controlMessage);
 
-    // Attempt to send control message immediately if channel is clear
-    if (isReceiving) {
-      radio.standby(); // Stop receiving to scan channel
-      isReceiving = false;
-    }
-    int state = radio.scanChannel();
-    if (state == RADIOLIB_CHANNEL_CLEAR) {
-      state = radio.transmit(&controlMessage, 1);
+    // Attempt immediate transmission if radio is free
+    if (!radioOperationPending) {
+      int state = radio.startChannelScan();
       if (state == RADIOLIB_ERR_NONE) {
-        Serial.print(F("Sent control message: "));
-        Serial.println(controlMessage);
-        newControlMessage = false; // Clear flag after sending
+        radioOperationPending = true;
+        channelScanComplete = false;
       } else {
-        Serial.print(F("Control message failed, code "));
+        Serial.print(F("Start channel scan failed, code "));
+        Serial.println(state);
+      }
+    }
+  }
+
+  // Handle channel scan completion
+  if (channelScanComplete) {
+    int state = radio.getChannelScanResult();
+    if (state == RADIOLIB_CHANNEL_CLEAR && newControlMessage) {
+      state = radio.startTransmit(&controlMessage, 1);
+      if (state == RADIOLIB_ERR_NONE) {
+        radioOperationPending = true;
+        transmitComplete = false;
+      } else {
+        Serial.print(F("Start transmit failed, code "));
         Serial.println(state);
       }
     } else {
-      Serial.println(F("Channel busy, retrying soon..."));
-      // Retry in next loop iteration (~10 ms delay)
+      Serial.println(F("Channel busy or no new message, retrying soon..."));
+      // Retry channel scan if needed
+      if (newControlMessage) {
+        state = radio.startChannelScan();
+        if (state == RADIOLIB_ERR_NONE) {
+          radioOperationPending = true;
+          channelScanComplete = false;
+        } else {
+          Serial.print(F("Start channel scan failed, code "));
+          Serial.println(state);
+        }
+      } else {
+        // Return to receive mode
+        state = radio.startReceive();
+        if (state == RADIOLIB_ERR_NONE) {
+          radioOperationPending = true;
+        } else {
+          Serial.print(F("Start receive failed, code "));
+          Serial.println(state);
+          radioOperationPending = false;
+        }
+      }
     }
-    radio.startReceive(); // Return to receive mode
-    isReceiving = true;
-    lastReceiveTime = currentTime;
+    channelScanComplete = false;
   }
 
-  // Receive LoRa telemetry
-  if (isReceiving) {
-    uint8_t rxBuffer[80]; // 10 samples x 8 bytes
-    int state = radio.receive(rxBuffer, 80);
+  // Handle completed transmission
+  if (transmitComplete) {
+    Serial.print(F("Sent control message: "));
+    Serial.println(controlMessage);
+    newControlMessage = false;
+    transmitComplete = false;
+    // Return to receive mode
+    int state = radio.startReceive();
+    if (state == RADIOLIB_ERR_NONE) {
+      radioOperationPending = true;
+    } else {
+      Serial.print(F("Start receive failed, code "));
+      Serial.println(state);
+      radioOperationPending = false;
+    }
+  }
+
+  // Handle received telemetry
+  if (receiveComplete) {
+    uint8_t rxBuffer[80];
+    int state = radio.readData(rxBuffer, 80);
     if (state == RADIOLIB_ERR_NONE) {
       Serial.println(F("Received telemetry packet!"));
-      // Decode delta-encoded data
       uint16_t lastPressure = 0, lastTimestamp = 0, lastAltitude = 0;
       int16_t lastTemperature = 0;
       for (int i = 0; i < 80; i += 8) {
@@ -164,13 +236,11 @@ void loop() {
         uint16_t timestamp = lastTimestamp + deltaTimestamp;
         uint16_t altitude = lastAltitude + deltaAltitude;
 
-        // Format telemetry as string
         char telemetryStr[100];
         snprintf(telemetryStr, sizeof(telemetryStr),
                  "Pressure=%.2f hPa, Temperature=%.1f °C, Timestamp=%u ms, Altitude=%.2f m\n",
                  pressure / 100.0, temperature / 10.0, timestamp, altitude / 100.0);
 
-        // Send to Serial and TCP client
         Serial.print(telemetryStr);
         if (tcpClient.connected()) {
           tcpClient.print(telemetryStr);
@@ -184,52 +254,71 @@ void loop() {
         lastAltitude = altitude;
       }
 
-      // Send control message if one is pending and channel is clear
-      if (newControlMessage) {
-        radio.standby(); // Stop receiving to scan channel
-        isReceiving = false;
-        state = radio.scanChannel();
-        if (state == RADIOLIB_CHANNEL_CLEAR) {
-          state = radio.transmit(&controlMessage, 1);
-          if (state == RADIOLIB_ERR_NONE) {
-            Serial.print(F("Sent control message: "));
-            Serial.println(controlMessage);
-            newControlMessage = false; // Clear flag after sending
-          } else {
-            Serial.print(F("Control message failed, code "));
-            Serial.println(state);
-          }
+      // Send control message if pending
+      if (newControlMessage || controlMessage != 42) {
+        state = radio.startChannelScan();
+        if (state == RADIOLIB_ERR_NONE) {
+          radioOperationPending = true;
+          channelScanComplete = false;
         } else {
-          Serial.println(F("Channel busy after telemetry, retrying soon..."));
+          Serial.print(F("Start channel scan failed, code "));
+          Serial.println(state);
+          // Fallback to receive mode
+          state = radio.startReceive();
+          if (state == RADIOLIB_ERR_NONE) {
+            radioOperationPending = true;
+          } else {
+            Serial.print(F("Start receive failed, code "));
+            Serial.println(state);
+            radioOperationPending = false;
+          }
         }
       } else {
-        // Send default control message (42) if no new message
+        // Send default control message
         uint8_t defaultMessage = 42;
-        state = radio.scanChannel();
-        if (state == RADIOLIB_CHANNEL_CLEAR) {
-          state = radio.transmit(&defaultMessage, 1);
-          if (state == RADIOLIB_ERR_NONE) {
-            Serial.print(F("Sent default control message: "));
-            Serial.println(defaultMessage);
-          } else {
-            Serial.print(F("Control message failed, code "));
-            Serial.println(state);
-          }
+        state = radio.startChannelScan();
+        if (state == RADIOLIB_ERR_NONE) {
+          radioOperationPending = true;
+          channelScanComplete = false;
+          controlMessage = defaultMessage;
         } else {
-          Serial.println(F("Channel busy for default message, skipping..."));
+          Serial.print(F("Start channel scan failed, code "));
+          Serial.println(state);
+          state = radio.startReceive();
+          if (state == RADIOLIB_ERR_NONE) {
+            radioOperationPending = true;
+          } else {
+            Serial.print(F("Start receive failed, code "));
+            Serial.println(state);
+            radioOperationPending = false;
+          }
         }
       }
-
-      // Return to receive mode
-      radio.startReceive();
-      isReceiving = true;
-      lastReceiveTime = currentTime;
+    } else {
+      Serial.print(F("Receive error, code "));
+      Serial.println(state);
+      state = radio.startReceive();
+      if (state == RADIOLIB_ERR_NONE) {
+        radioOperationPending = true;
+      } else {
+        Serial.print(F("Start receive failed, code "));
+        Serial.println(state);
+        radioOperationPending = false;
+      }
     }
+    receiveComplete = false;
   }
 
-  // Timeout to prevent getting stuck in receive mode
-  if (isReceiving && currentTime - lastReceiveTime >= 500) {
-    radio.startReceive(); // Restart receive
+  // Timeout to restart receive if stuck
+  if (radioOperationPending && currentTime - lastReceiveTime >= 500) {
+    int state = radio.startReceive();
+    if (state == RADIOLIB_ERR_NONE) {
+      radioOperationPending = true;
+    } else {
+      Serial.print(F("Start receive failed, code "));
+      Serial.println(state);
+      radioOperationPending = false;
+    }
     lastReceiveTime = currentTime;
   }
 }
