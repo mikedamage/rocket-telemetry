@@ -2,6 +2,9 @@
 #include <Wire.h>             // I2C for BMP280
 #include <Adafruit_BMP280.h>  // BMP280 sensor library
 #include <math.h>             // For altitude calculation
+                              //
+
+#define SAMPLE_INTERVAL 50 // sample sensors every N milliseconds
 
 #define PRINT_SIGNAL_STATS true
 
@@ -52,7 +55,14 @@ uint8_t txBuffer[80];  // ~8 bytes/sample x 10 samples
 uint8_t bufferIndex = 0;
 unsigned long lastSampleTime = 0;
 unsigned long lastTransmitTime = 0;
-bool isReceiving = false;
+volatile bool isReceiving = false;
+volatile bool isTransmitting = false;
+volatile bool newControlMessage = false;
+volatile bool radioOperationPending = false;
+volatile bool shouldRestart = false;
+volatile bool transmitComplete = false;
+volatile bool receiveComplete = false;
+uint8_t controlMessage = 0;
 
 // Transmission state
 enum TransmitState { STOPPED,
@@ -60,55 +70,24 @@ enum TransmitState { STOPPED,
 TransmitState transmitState = STOPPED;  // Start in STOPPED state
 TransmitState prevTransmitState = STOPPED;
 
-volatile bool operationDone = false;
-volatile bool txDone = false;
-volatile bool rxDone = false;
-volatile bool rxTimeout = false;
-uint8_t controlMessage = 0;
-uint8_t rxBuffer[1]; // Expecting 1-byte control messages
+// LoRa settings
+#define FREQUENCY 918.0  // US band
+#define SPREADING_FACTOR 7
+#define BANDWIDTH 250.0  // kHz
+#define CODING_RATE 6    // 4:6
+#define SYNC_WORD 0x34   // Public LoRa sync word
+// #define POWER 22         // Max TX power (22 dBm == 158 mW)
+#define POWER 1 // Low power for bench testing (1 dBm == 1.3 mW)
+#define TXCO_VOLTAGE 1.8
+#define PREAMBLE_LENGTH 8
 
-#if defined(ESP32)
-  ICACHE_RAM_ATTR
-#endif
-
-void onTxDone(void) {
-  txDone = true;
-}
-
-void onRxDone(void) {
-  rxDone = true;
-  int len = radio.getPacketLength();
-
-#if PRINT_SIGNAL_STATS
-  float snr = radio.getSNR();
-  float rssi = radio.getRSSI();
-  Serial.printf("LoRa packet received. SNR: %.4f, RSSI: %.4f\n", snr, rssi);
-#endif
-
-  if (len > 1) {
-    Serial.printf("Ignoring received packet > 1 byte (length: %d)\n", len);
-    return;
+void IRAM_ATTR onDio1Action(void) {
+  if (isReceiving) {
+    receiveComplete = true;
+    newControlMessage = true;
+    isReceiving = false;
   }
-
-  int state = radio.readData(rxBuffer, 1);
-
-  if (state == RADIOLIB_ERR_NONE) {
-    Serial.printf("Received control message: %d", rxBuffer[0]);
-    controlMessage = rxBuffer[0];
-  } else {
-    Serial.printf("Radio receive error %d\n", state);
-  }
-
-  isReceiving = false;
-}
-
-void onRxTimeout(void*) {
-  isReceiving = false;
-  rxTimeout = true;
-
-  if (prevTransmitState == RUNNING) {
-    transmitState = RUNNING;
-  }
+  radioOperationPending = false;
 }
 
 // Calculate altitude relative to 480 feet
@@ -146,21 +125,25 @@ void setup() {
     while (1)
       ;
   }
+  radio.setDio1Action(onDio1Action);
   Serial.println(F("LoRa init success!"));
 
-  radio.setDio1Action(onTxDone);
-  radio.setPacketReceivedAction(onRxDone);
-  // radio.setRxTimeoutAction(onRxTimeout);
-
-  // Listen for control message
-  Serial.println("Listening for control message...");
+  // Start in receive mode
+  state = radio.startReceive();
+  if (state == RADIOLIB_ERR_NONE) {
+    isReceiving = true;
+    radioOperationPending = true;
+  } else {
+    Serial.print("start receive failed, code ");
+    Serial.println(state);
+  }
 }
 
 void loop() {
   unsigned long currentTime = millis();
 
   // Sample every 20 ms only if RUNNING
-  if (transmitState == RUNNING && currentTime - lastSampleTime >= 20) {
+  if (transmitState == RUNNING && currentTime - lastSampleTime >= SAMPLE_INTERVAL) {
     /*
     // Read BMP280
     float pressure = bmp.readPressure() / 100.0; // hPa
@@ -180,7 +163,7 @@ void loop() {
     bufferIndex++;
     lastSampleTime = currentTime;
 
-    // Transmit when buffer is full (10 samples, every 200 ms)
+    // Transmit when buffer is full (10 samples, every 500 ms)
     if (bufferIndex >= BUFFER_SIZE && !isReceiving) {
       // Simple delta encoding
       int txIndex = 0;
@@ -211,10 +194,10 @@ void loop() {
       }
 
       // Transmit over LoRa
-      txDone = false;
-      int state = radio.startTransmit(txBuffer, txIndex);
-      if (state != RADIOLIB_ERR_NONE) {
-        Serial.print(F("Transmission failed, code "));
+      int state = radio.transmit(txBuffer, txIndex);
+      if (state == RADIOLIB_ERR_NONE) {
+        Serial.printf(F("Transmission successful. currentTime = %d\n"), (int)(currentTime % 65536));
+      } else {
         Serial.println(state);
         // delay(10);
         return;
@@ -228,19 +211,22 @@ void loop() {
       bufferIndex = 0;  // Reset buffer
       lastTransmitTime = currentTime;
 
-      // Switch to receive mode for 10ms window
-      // prevTransmitState = RUNNING;
-      transmitState = STOPPED;
-      isReceiving = true;
+      // Switch to receive mode
+      Serial.println("receive window start");
       radio.startReceive();
-      delay(10);
-      radio.standby();
-      transmitState = RUNNING;
-      isReceiving = false;
+      isReceiving = true;
+      radioOperationPending = true;
     }
   }
 
-  radio.startReceive();
+  // Check for received control messages (8-bit integers)
+  if (receiveComplete) {
+    uint8_t rxBuffer[1];  // Expecting 1-byte control message
+    int state = radio.readData(rxBuffer, 1);
+    Serial.println("read rxBuffer");
+    if (state == RADIOLIB_ERR_NONE) {
+      Serial.print(F("Received control message: "));
+      Serial.println(rxBuffer[0]);
 
   // If an unprocessed control message is present, act on it
   if (controlMessage > 0) {
@@ -254,14 +240,15 @@ void loop() {
         break;
       case 2:
         transmitState = STOPPED;
-        prevTransmitState = STOPPED;
-        isReceiving = true;
-        radio.startReceive();
-        Serial.println("Stopping telemetry sampling and transmission");
-        break;
-      case 4:
-        Serial.println("TODO - Starting BLE beacon");
-        break;
+        Serial.println(F("Stopping telemetry sampling and transmission"));
+        bufferIndex = 0;  // Clear buffer
+      }
+
+      isReceiving = false;  // Stop receiving until next cycle
+      receiveComplete = false;
+      controlMessage = 0;
+      radio.standby();
+      delay(1);
     }
 
     // reset control message and await another

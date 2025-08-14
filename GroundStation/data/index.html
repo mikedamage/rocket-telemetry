@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Rocket GroundStation</title>
+    <link href="css/style.css" rel="stylesheet" />
+  </head>
+  <body>
+    <header>
+      <h1>Mission Control</h1>
+    </header>
+
+    <main>
+      <section id="control-messages">
+        <h2>Rocket Commands</h2>
+        <button type="button" data-control-message="startTelemetry">Start Telemetry</button>
+        <button type="button" data-control-message="stopTelemetry">Stop Telemetry</button>
+        <button type="button" data-control-message="startBleBeacon">Start BLE Beacon</button>
+        <button type="button" data-control-message="stopBleBeacon">Stop BLE Beacon</button>
+      </section>
+
+      <section id="telemetry-settings">
+        <h2>Settings</h2>
+        <form id="settings-form">
+          <fieldset>
+            <legend>Telemetry Endpoint</legend>
+            <div class="field">
+              <label for="telemetry-server-host">Host IP:</label>
+              <input
+                type="text"
+                pattern="^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}"
+                id="telemetry-server-host"
+                placeholder="xxx.xxx.xxx.xxx"
+              />
+            </div>
+            <div class="field">
+              <label for="telemetry-server-port">Host Port:</label>
+              <input id="telemetry-server-port" type="number" min="1" max="65535" step="1" required />
+            </div>
+          </fieldset>
+          <fieldset>
+            <legend>WiFi Network</legend>
+            <div class="field">
+              <label for="wifi-ssid">SSID:</label>
+              <input type="text" required id="wifi-ssid" />
+            </div>
+            <div class="field">
+              <label for="wifi-psk">WiFi Password:</label>
+              <input type="password" required id="wifi-psk" />
+            </div>
+          </fieldset>
+          <button class="save">Update</button>
+          <div class="status"></div>
+        </form>
+      </section>
+
+      <section id="admin">
+        <h2>Admin</h2>
+
+        <button id="restart" type="button">Restart ESP32</button>
+        <button id="disconnect-telemetry" type="button">Disconnect Telemetry Endpoint</button>
+        <button id="connect-telemetry" type="button">Connect Telemetry</button>
+      </section>
+    </main>
+
+    <script src="/js/main.js"></script>
+  </body>
+</html>
