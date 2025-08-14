@@ -2,6 +2,9 @@
 #include <Wire.h>             // I2C for BMP280
 #include <Adafruit_BMP280.h>  // BMP280 sensor library
 #include <math.h>             // For altitude calculation
+                              //
+
+#define SAMPLE_INTERVAL 50 // sample sensors every N milliseconds
 
 // Heltec WiFi LoRa 32 V3 pin definitions for SX1262
 #define LORA_NSS 8    // Chip select
@@ -39,7 +42,14 @@ uint8_t txBuffer[80];  // ~8 bytes/sample x 10 samples
 uint8_t bufferIndex = 0;
 unsigned long lastSampleTime = 0;
 unsigned long lastTransmitTime = 0;
-bool isReceiving = false;
+volatile bool isReceiving = false;
+volatile bool isTransmitting = false;
+volatile bool newControlMessage = false;
+volatile bool radioOperationPending = false;
+volatile bool shouldRestart = false;
+volatile bool transmitComplete = false;
+volatile bool receiveComplete = false;
+uint8_t controlMessage = 0;
 
 // Transmission state
 enum TransmitState { STOPPED,
@@ -56,6 +66,15 @@ TransmitState transmitState = STOPPED;  // Start in STOPPED state
 #define POWER 1 // Low power for bench testing (1 dBm == 1.3 mW)
 #define TXCO_VOLTAGE 1.8
 #define PREAMBLE_LENGTH 8
+
+void IRAM_ATTR onDio1Action(void) {
+  if (isReceiving) {
+    receiveComplete = true;
+    newControlMessage = true;
+    isReceiving = false;
+  }
+  radioOperationPending = false;
+}
 
 // Calculate altitude relative to 480 feet
 float calculateAltitude(float pressure, float temperature) {
@@ -92,18 +111,25 @@ void setup() {
     while (1)
       ;
   }
+  radio.setDio1Action(onDio1Action);
   Serial.println(F("LoRa init success!"));
 
   // Start in receive mode
-  radio.startReceive();
-  isReceiving = true;
+  state = radio.startReceive();
+  if (state == RADIOLIB_ERR_NONE) {
+    isReceiving = true;
+    radioOperationPending = true;
+  } else {
+    Serial.print("start receive failed, code ");
+    Serial.println(state);
+  }
 }
 
 void loop() {
   unsigned long currentTime = millis();
 
   // Sample every 20 ms only if RUNNING
-  if (transmitState == RUNNING && currentTime - lastSampleTime >= 40) {
+  if (transmitState == RUNNING && currentTime - lastSampleTime >= SAMPLE_INTERVAL) {
     /*
     // Read BMP280
     float pressure = bmp.readPressure() / 100.0; // hPa
@@ -123,7 +149,7 @@ void loop() {
     bufferIndex++;
     lastSampleTime = currentTime;
 
-    // Transmit when buffer is full (10 samples, every 200 ms)
+    // Transmit when buffer is full (10 samples, every 500 ms)
     if (bufferIndex >= BUFFER_SIZE && !isReceiving) {
       // Simple delta encoding
       int txIndex = 0;
@@ -166,15 +192,18 @@ void loop() {
       lastTransmitTime = currentTime;
 
       // Switch to receive mode
+      Serial.println("receive window start");
       radio.startReceive();
       isReceiving = true;
+      radioOperationPending = true;
     }
   }
 
   // Check for received control messages (8-bit integers)
-  if (isReceiving) {
+  if (receiveComplete) {
     uint8_t rxBuffer[1];  // Expecting 1-byte control message
-    int state = radio.startReceive(rxBuffer, 1);
+    int state = radio.readData(rxBuffer, 1);
+    Serial.println("read rxBuffer");
     if (state == RADIOLIB_ERR_NONE) {
       Serial.print(F("Received control message: "));
       Serial.println(rxBuffer[0]);
@@ -192,15 +221,10 @@ void loop() {
       }
 
       isReceiving = false;  // Stop receiving until next cycle
-    } else if (state == RADIOLIB_ERR_RX_TIMEOUT) {
-      // No message received, check if time to transmit again (if RUNNING)
-      if (transmitState == RUNNING && currentTime - lastTransmitTime >= 200) {
-        isReceiving = false;  // Allow next transmission
-      }
-    } else {
-      Serial.print(F("Receive error, code "));
-      Serial.println(state);
-      isReceiving = false;  // Reset to avoid getting stuck
+      receiveComplete = false;
+      controlMessage = 0;
+      radio.standby();
+      delay(1);
     }
   }
 }
