@@ -4,20 +4,36 @@
 #include <Wire.h>
 #include <Adafruit_BMP280.h>
 #include <AsyncTCP.h>
+#include <ESPAsyncWebServer.h>
+#include <ArduinoJson.h>
 #include <LittleFS.h>
+#include <Preferences.h>
+#include <BLEDevice.h>
+#include <BLEUtils.h>
+#include <BLEBeacon.h>
+#include <BLEAdvertising.h>
 
-// Network configuration
-const char* ssid = "YOUR_WIFI_SSID";
-const char* password = "YOUR_WIFI_PASSWORD";
+// Default configuration values
+const char* DEFAULT_SSID = "***REMOVED***";
+const char* DEFAULT_PASSWORD = "***REMOVED***";
+const unsigned long DEFAULT_READING_INTERVAL = 20; // 20ms default
+
+// Network configuration (will be loaded from preferences)
+String configSSID;
+String configPassword;
+unsigned long readingInterval;
 const char* serverIP = "192.168.1.100";  // Change to your server IP
-const int serverPort = 8080;
-const int localPort = 8081;  // Port for control server
+const int serverPort = 5150;
+const int localPort = 80;  // Port for HTTP API server
 
-// Command definitions
-#define CMD_NOOP 0
-#define CMD_START 1
-#define CMD_STOP 2
-#define CMD_REBOOT 3
+// iBeacon UUID for rocket identification (generate your own!)
+#define BEACON_UUID "12345678-1234-5678-9012-123456789ABC"
+#define BEACON_MAJOR 1
+#define BEACON_MINOR 1
+
+// Landing detection parameters
+const float ALTITUDE_STABILITY_THRESHOLD = 2.0; // meters
+const unsigned long STABILITY_DURATION = 10000; // 10 seconds in milliseconds
 
 // Sensor data structure
 struct SensorReading {
@@ -34,12 +50,21 @@ int bufferIndex = 0;
 
 // Timing
 unsigned long lastReading = 0;
-const unsigned long READING_INTERVAL = 20; // 20ms
+
+// Landing detection variables
+float altitudeHistory[50]; // Store last 50 altitude readings for stability check
+int altitudeHistoryIndex = 0;
+bool altitudeHistoryFull = false;
+unsigned long stabilityStartTime = 0;
+bool altitudeStable = false;
+bool landingDetected = false;
 
 // Objects
 Adafruit_BMP280 bmp;
-AsyncServer* controlServer;
+AsyncWebServer server(localPort);
 AsyncClient* dataClient;
+BLEAdvertising* pAdvertising;
+Preferences preferences;
 
 // File system
 const char* csvFileName = "/telemetry.csv";
@@ -51,25 +76,29 @@ bool sensorReady = false;
 bool wifiConnected = false;
 bool transmissionEnabled = true;
 bool dataTransmissionInProgress = false;
+bool beaconActive = false;
 
 void setup() {
   Serial.begin(115200);
   while (!Serial) delay(10);
 
-  Serial.println("TinyPICO Rocket Telemetry System Starting...");
+  Serial.println(F("TinyPICO Rocket Telemetry System Starting..."));
+
+  // Load configuration from preferences
+  loadConfiguration();
 
   // Initialize LittleFS
   if (LittleFS.begin()) {
     fileSystemReady = true;
-    Serial.println("LittleFS mounted successfully");
+    Serial.println(F("LittleFS mounted successfully"));
 
     // Create CSV header if file doesn't exist
     if (!LittleFS.exists(csvFileName)) {
       File csvFile = LittleFS.open(csvFileName, "w");
       if (csvFile) {
-        csvFile.println("timestamp,temperature,pressure,altitude");
+        csvFile.println(F("timestamp,temperature,pressure,altitude"));
         csvFile.close();
-        Serial.println("CSV file created with header");
+        Serial.println(F("CSV file created with header"));
       }
     }
 
@@ -79,7 +108,7 @@ void setup() {
     Serial.printf("Flash storage: %d/%d bytes used\n", usedBytes, totalBytes);
 
   } else {
-    Serial.println("LittleFS mount failed");
+    Serial.println(F("LittleFS mount failed"));
     fileSystemReady = false;
   }
 
@@ -89,7 +118,7 @@ void setup() {
   // Initialize BMP280
   if (!bmp.begin(0x76)) {  // Try primary address first
     if (!bmp.begin(0x77)) {  // Try alternate address
-      Serial.println("Could not find BMP280 sensor!");
+      Serial.println(F("Could not find BMP280 sensor!"));
       while (1) delay(10);
     }
   }
@@ -102,7 +131,7 @@ void setup() {
                   Adafruit_BMP280::STANDBY_MS_1);   // Standby time
 
   sensorReady = true;
-  Serial.println("BMP280 initialized successfully");
+  Serial.println(F("BMP280 initialized successfully"));
 
   // Connect to WiFi
   connectWiFi();
@@ -111,58 +140,246 @@ void setup() {
   dataClient = new AsyncClient();
   setupDataClientCallbacks();
 
-  // Start control server
-  controlServer = new AsyncServer(localPort);
-  setupControlServer();
-  controlServer->begin();
-  Serial.println("Control server started on port " + String(localPort));
+  // Setup HTTP REST API server
+  setupHTTPServer();
+  server.begin();
+  Serial.print(F("HTTP API server started on port "));
+  Serial.println(String(localPort));
 
-  Serial.println("System ready - starting data collection");
+  // Initialize BLE (but don't start beacon yet)
+  initializeBLE();
+
+  Serial.println(F("System ready - starting data collection"));
+  Serial.printf(F("Reading interval: %lu ms\n"), readingInterval);
 }
 
 void loop() {
-  // Take sensor readings every 20ms
-  if (millis() - lastReading >= READING_INTERVAL) {
-    takeSensorReading();
-    lastReading = millis();
-  }
+  if (!landingDetected) {
+    // Normal flight operations
 
-  // Send buffer when full
-  if (bufferIndex >= BUFFER_SIZE && transmissionEnabled && !dataTransmissionInProgress) {
-    sendDataBuffer();
-    logDataToCSV();  // Log to CSV at same frequency as transmission
-  }
+    // Take sensor readings at configured interval
+    if (millis() - lastReading >= readingInterval) {
+      takeSensorReading();
+      lastReading = millis();
 
-  // Reconnect WiFi if needed
-  if (!WiFi.isConnected() && wifiConnected) {
-    Serial.println("WiFi disconnected, attempting reconnection...");
-    connectWiFi();
+      // Check for landing after each reading
+      checkLandingCondition();
+    }
+
+    // Send buffer when full
+    if (bufferIndex >= BUFFER_SIZE && transmissionEnabled && !dataTransmissionInProgress) {
+      sendDataBuffer();
+      logDataToCSV();  // Log to CSV at same frequency as transmission
+    }
+
+    // Reconnect WiFi if needed
+    if (!WiFi.isConnected() && wifiConnected) {
+      Serial.println(F("WiFi disconnected, attempting reconnection..."));
+      connectWiFi();
+    }
+  } else {
+    // Landing detected - beacon mode only
+    if (!beaconActive) {
+      activateBLEBeacon();
+    }
+    // In beacon mode, just handle control commands and maintain beacon
   }
 
   delay(1); // Small delay to prevent watchdog issues
 }
 
+void loadConfiguration() {
+  preferences.begin("rocket-config", false);
+
+  // Load WiFi configuration
+  configSSID = preferences.getString("ssid", DEFAULT_SSID);
+  configPassword = preferences.getString("password", DEFAULT_PASSWORD);
+  readingInterval = preferences.getULong("interval", DEFAULT_READING_INTERVAL);
+
+  Serial.println(("Configuration loaded:"));
+  Serial.print("SSID: ");
+  Serial.println(configSSID);
+  Serial.printf(F("Reading interval: %lu ms\n"), readingInterval);
+
+  preferences.end();
+}
+
+void saveConfiguration() {
+  preferences.begin("rocket-config", false);
+
+  preferences.putString("ssid", configSSID);
+  preferences.putString("password", configPassword);
+  preferences.putULong("interval", readingInterval);
+
+  preferences.end();
+  Serial.println(F("Configuration saved to preferences"));
+}
+
 void connectWiFi() {
-  Serial.println("Connecting to WiFi: " + String(ssid));
-  WiFi.begin(ssid, password);
+  Serial.print(F("Connecting to WiFi: "));
+  Serial.println(configSSID);
+  WiFi.begin(configSSID.c_str(), configPassword.c_str());
 
   int attempts = 0;
   while (WiFi.status() != WL_CONNECTED && attempts < 20) {
     delay(500);
-    Serial.print(".");
+    Serial.print(F("."));
     attempts++;
   }
 
   if (WiFi.status() == WL_CONNECTED) {
     wifiConnected = true;
     Serial.println();
-    Serial.println("WiFi connected!");
-    Serial.println("IP address: " + WiFi.localIP().toString());
+    Serial.println(F("WiFi connected!"));
+    Serial.print(F("IP address: "));
+    Serial.println(WiFi.localIP().toString());
   } else {
     wifiConnected = false;
     Serial.println();
-    Serial.println("WiFi connection failed");
+    Serial.println(F("WiFi connection failed"));
   }
+}
+
+void setupHTTPServer() {
+  // GET /status - Get system status
+  server.on("/status", HTTP_GET, [](AsyncWebServerRequest *request) {
+    DynamicJsonDocument doc(1024);
+
+    doc["uptime"] = millis();
+    doc["wifi_connected"] = wifiConnected;
+    doc["sensor_ready"] = sensorReady;
+    doc["transmission_enabled"] = transmissionEnabled;
+    doc["landing_detected"] = landingDetected;
+    doc["beacon_active"] = beaconActive;
+    doc["buffer_count"] = bufferIndex;
+    doc["buffer_size"] = BUFFER_SIZE;
+    doc["free_heap"] = ESP.getFreeHeap();
+    doc["reading_interval"] = readingInterval;
+
+    if (sensorReady) {
+      float temp = bmp.readTemperature();
+      float pressure = bmp.readPressure();
+      float altitude = bmp.readAltitude(1013.25);
+
+      doc["current_temperature"] = temp;
+      doc["current_pressure"] = pressure;
+      doc["current_altitude"] = altitude;
+    }
+
+    String response;
+    serializeJson(doc, response);
+    request->send(200, "application/json", response);
+  });
+
+  // POST /command - Send control commands
+  server.on("/command", HTTP_POST, [](AsyncWebServerRequest *request) {
+    // This will be handled by the body handler
+  }, NULL, [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+    DynamicJsonDocument doc(256);
+    deserializeJson(doc, (char*)data);
+
+    String command = doc["command"];
+    bool success = true;
+    String message = "OK";
+
+    if (command == "start") {
+      transmissionEnabled = true;
+      message = "Transmission enabled";
+    } else if (command == "stop") {
+      transmissionEnabled = false;
+      message = "Transmission disabled";
+    } else if (command == "reset") {
+      bufferIndex = 0;
+      message = "Buffer reset";
+    } else if (command == "reboot") {
+      message = "Rebooting...";
+      request->send(200, "application/json", "{\"success\":true,\"message\":\"" + message + "\"}");
+      delay(100);
+      ESP.restart();
+      return;
+    } else {
+      success = false;
+      message = "Unknown command";
+    }
+
+    DynamicJsonDocument response(256);
+    response["success"] = success;
+    response["message"] = message;
+
+    String responseStr;
+    serializeJson(response, responseStr);
+    request->send(success ? 200 : 400, "application/json", responseStr);
+  });
+
+  // PUT /config - Update configuration
+  server.on("/config", HTTP_PUT, [](AsyncWebServerRequest *request) {
+    // This will be handled by the body handler
+  }, NULL, [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+    DynamicJsonDocument doc(512);
+    deserializeJson(doc, (char*)data);
+
+    bool configChanged = false;
+    String message = "Configuration updated";
+
+    // Update WiFi SSID
+    if (doc.containsKey("ssid")) {
+      String newSSID = doc["ssid"];
+      if (newSSID != configSSID) {
+        configSSID = newSSID;
+        configChanged = true;
+      }
+    }
+
+    // Update WiFi password
+    if (doc.containsKey("password")) {
+      String newPassword = doc["password"];
+      if (newPassword != configPassword) {
+        configPassword = newPassword;
+        configChanged = true;
+      }
+    }
+
+    // Update reading interval
+    if (doc.containsKey("reading_interval")) {
+      unsigned long newInterval = doc["reading_interval"];
+      if (newInterval >= 10 && newInterval <= 10000) { // Limit between 10ms and 10s
+        readingInterval = newInterval;
+        Serial.printf(F("Reading interval updated to: %lu ms\n"), readingInterval);
+      } else {
+        message = "Invalid reading interval (must be 10-10000 ms)";
+      }
+    }
+
+    // Save configuration
+    saveConfiguration();
+
+    // If WiFi config changed, note that restart may be needed
+    if (configChanged) {
+      message += " (WiFi restart may be required)";
+    }
+
+    DynamicJsonDocument response(256);
+    response["success"] = true;
+    response["message"] = message;
+    response["config_changed"] = configChanged;
+
+    String responseStr;
+    serializeJson(response, responseStr);
+    request->send(200, "application/json", responseStr);
+  });
+
+  // GET /config - Get current configuration
+  server.on("/config", HTTP_GET, [](AsyncWebServerRequest *request) {
+    DynamicJsonDocument doc(512);
+
+    doc["ssid"] = configSSID;
+    doc["password"] = "[HIDDEN]"; // Don't expose password
+    doc["reading_interval"] = readingInterval;
+
+    String response;
+    serializeJson(doc, response);
+    request->send(200, "application/json", response);
+  });
 }
 
 void takeSensorReading() {
@@ -173,6 +390,13 @@ void takeSensorReading() {
   float pressure = bmp.readPressure();
   float altitude = bmp.readAltitude(1013.25); // Sea level pressure in hPa
 
+  // Store altitude in history buffer for stability checking
+  altitudeHistory[altitudeHistoryIndex] = altitude;
+  altitudeHistoryIndex = (altitudeHistoryIndex + 1) % 50;
+  if (altitudeHistoryIndex == 0) {
+    altitudeHistoryFull = true;
+  }
+
   // Convert to 16-bit integers to reduce payload size
   dataBuffer[bufferIndex].timestamp = millis();
   dataBuffer[bufferIndex].temperature = (int16_t)(temp * 100);        // Store as temp * 100
@@ -181,16 +405,99 @@ void takeSensorReading() {
 
   bufferIndex++;
 
-  // Debug output every 25 readings (every 500ms)
+  // Debug output every 25 readings
   if (bufferIndex % 25 == 0) {
-    Serial.printf("Reading %d: T=%.2f°C, P=%.0fPa, A=%.2fm\n",
-                  bufferIndex, temp, pressure, altitude);
+    Serial.printf(F("Reading %d: T=%.2f°C, P=%.0fPa, A=%.2fm (interval: %lums)\n"),
+                  bufferIndex, temp, pressure, altitude, readingInterval);
   }
+}
+
+void checkLandingCondition() {
+  if (!altitudeHistoryFull) {
+    return; // Need full history buffer before checking stability
+  }
+
+  // Calculate altitude variance over the history buffer
+  float sum = 0;
+  for (int i = 0; i < 50; i++) {
+    sum += altitudeHistory[i];
+  }
+  float mean = sum / 50.0;
+
+  float variance = 0;
+  for (int i = 0; i < 50; i++) {
+    float diff = altitudeHistory[i] - mean;
+    variance += diff * diff;
+  }
+  variance /= 50.0;
+  float stdDev = sqrt(variance);
+
+  // Check if altitude is stable (standard deviation within threshold)
+  bool currentlyStable = (stdDev <= ALTITUDE_STABILITY_THRESHOLD);
+
+  if (currentlyStable && !altitudeStable) {
+    // Just became stable
+    altitudeStable = true;
+    stabilityStartTime = millis();
+    Serial.printf(F("Altitude stabilized (stddev: %.2fm). Starting stability timer...\n"), stdDev);
+  } else if (!currentlyStable && altitudeStable) {
+    // No longer stable
+    altitudeStable = false;
+    Serial.println(F("Altitude destabilized. Resetting stability timer."));
+  } else if (currentlyStable && altitudeStable) {
+    // Check if we've been stable long enough
+    if (millis() - stabilityStartTime >= STABILITY_DURATION) {
+      Serial.println(F("Landing detected! Altitude stable for 10 seconds."));
+      Serial.printf(F("Final altitude: %.2fm (stddev: %.2fm)\n"), mean, stdDev);
+      landingDetected = true;
+
+      // Send any remaining data before switching to beacon mode
+      if (bufferIndex > 0 && transmissionEnabled) {
+        sendDataBuffer();
+        logDataToCSV();
+      }
+    }
+  }
+}
+
+void initializeBLE() {
+  Serial.println(F("Initializing BLE..."));
+  BLEDevice::init("RocketBeacon");
+  BLEDevice::setPower(ESP_PWR_LVL_P9); // Maximum power for better range
+
+  pAdvertising = BLEDevice::getAdvertising();
+  Serial.println(F("BLE initialized (beacon inactive)"));
+}
+
+void activateBLEBeacon() {
+  Serial.println(F("Activating BLE beacon for rocket recovery..."));
+
+  // Create iBeacon
+  BLEBeacon oBeacon = BLEBeacon();
+  oBeacon.setManufacturerId(0x004C); // Apple manufacturer ID for iBeacon compatibility
+  oBeacon.setProximityUUID(BLEUUID(BEACON_UUID));
+  oBeacon.setMajor(BEACON_MAJOR);
+  oBeacon.setMinor(BEACON_MINOR);
+  oBeacon.setSignalPower(0xC5); // Signal power at 1m distance
+
+  BLEAdvertisementData oAdvertisementData = BLEAdvertisementData();
+  BLEAdvertisementData oScanResponseData = BLEAdvertisementData();
+
+  oAdvertisementData.setFlags(0x04); // BR_EDR_NOT_SUPPORTED
+  String strServiceData = oBeacon.getData();
+  oAdvertisementData.addData(strServiceData);
+
+  pAdvertising->setAdvertisementData(oAdvertisementData);
+  pAdvertising->setScanResponseData(oScanResponseData);
+  pAdvertising->start();
+
+  beaconActive = true;
+  Serial.println(F("BLE beacon active - rocket can now be located!"));
 }
 
 void setupDataClientCallbacks() {
   dataClient->onConnect([](void* arg, AsyncClient* client) {
-    Serial.println("Connected to data server");
+    Serial.println(F("Connected to data server"));
 
     // Send header with data count
     client->write((const char*)&bufferIndex, sizeof(int));
@@ -204,13 +511,13 @@ void setupDataClientCallbacks() {
   });
 
   dataClient->onDisconnect([](void* arg, AsyncClient* client) {
-    Serial.println("Data sent successfully");
+    Serial.println(F("Data sent successfully"));
     bufferIndex = 0; // Reset buffer after successful transmission
     dataTransmissionInProgress = false;
   });
 
   dataClient->onError([](void* arg, AsyncClient* client, int error) {
-    Serial.printf("Data client error: %d\n", error);
+    Serial.printf(F("Data client error: %d\n"), error);
     dataTransmissionInProgress = false;
   });
 }
@@ -220,17 +527,17 @@ void sendDataBuffer() {
     return;
   }
 
-  Serial.println("Sending data buffer (" + String(bufferIndex) + " readings)...");
+  Serial.printf("Sending data buffer (%d readings)...\n", bufferIndex);
   dataTransmissionInProgress = true;
 
   IPAddress serverAddr;
   if (serverAddr.fromString(serverIP)) {
     if (!dataClient->connect(serverAddr, serverPort)) {
-      Serial.println("Failed to initiate connection to data server");
+      Serial.println(F("Failed to initiate connection to data server"));
       dataTransmissionInProgress = false;
     }
   } else {
-    Serial.println("Invalid server IP address");
+    Serial.println(F("Invalid server IP address"));
     dataTransmissionInProgress = false;
   }
 }
@@ -249,14 +556,14 @@ void logDataToCSV() {
   size_t estimatedBytes = bufferIndex * 50;
 
   if (freeBytes < estimatedBytes + 1000) { // Keep 1KB buffer
-    Serial.println("Flash storage full - stopping CSV logging");
+    Serial.println(F("Flash storage full - stopping CSV logging"));
     csvLoggingEnabled = false;
     return;
   }
 
   File csvFile = LittleFS.open(csvFileName, "a");
   if (!csvFile) {
-    Serial.println("Failed to open CSV file for writing");
+    Serial.println(F("Failed to open CSV file for writing"));
     return;
   }
 
@@ -271,53 +578,4 @@ void logDataToCSV() {
 
   csvFile.close();
   Serial.println("Data logged to CSV (" + String(bufferIndex) + " readings)");
-}
-
-void setupControlServer() {
-  controlServer->onClient([](void* arg, AsyncClient* client) {
-    Serial.println("Control client connected");
-
-    client->onData([](void* arg, AsyncClient* client, void* data, size_t len) {
-      if (len == 1) {
-        uint8_t command = *((uint8_t*)data);
-        handleControlCommand(command);
-      }
-    });
-
-    client->onDisconnect([](void* arg, AsyncClient* client) {
-      Serial.println("Control client disconnected");
-    });
-
-    client->onError([](void* arg, AsyncClient* client, int error) {
-      Serial.printf("Control client error: %d\n", error);
-    });
-  }, nullptr);
-}
-
-void handleControlCommand(uint8_t command) {
-  switch (command) {
-    case CMD_NOOP:
-      Serial.println("Command: NOOP");
-      break;
-
-    case CMD_START:
-      Serial.println("Command: START transmission");
-      transmissionEnabled = true;
-      break;
-
-    case CMD_STOP:
-      Serial.println("Command: STOP transmission");
-      transmissionEnabled = false;
-      break;
-
-    case CMD_REBOOT:
-      Serial.println("Command: REBOOT");
-      delay(100);
-      ESP.restart();
-      break;
-
-    default:
-      Serial.printf("Unknown command: %d\n", command);
-      break;
-  }
 }
