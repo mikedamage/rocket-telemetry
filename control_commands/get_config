@@ -1,0 +1,5 @@
+#!/bin/bash
+
+source ./common.sh
+
+api_request GET config | jq .
