@@ -4,6 +4,7 @@
 #include <Wire.h>
 #include <Adafruit_BMP280.h>
 // #include <AsyncTCP.h>
+#include <ArduinoOTA.h>
 #include <WiFiUdp.h>
 #include <ESPAsyncWebServer.h>
 #include <ArduinoJson.h>
@@ -49,7 +50,7 @@ const float ALTITUDE_STABILITY_THRESHOLD = 2.0; // meters
 const unsigned long STABILITY_DURATION = 10000; // 10 seconds in milliseconds
 
 // Sensor data structure
-const int BUFFER_SIZE = 50;
+const int BUFFER_SIZE = 20;
 int bufferIndex = 0;
 struct SensorReading
 {
@@ -216,6 +217,11 @@ void setup()
 
 void loop()
 {
+  if (wifiConnected)
+  {
+    ArduinoOTA.handle();
+  }
+
   currentTime = millis();
   checkTelemetryTimeout();
 
@@ -337,6 +343,8 @@ void connectWiFi()
     Serial.println(F("WiFi connected!"));
     Serial.print(F("IP address: "));
     Serial.println(WiFi.localIP().toString());
+    ArduinoOTA.setPassword("majortom");
+    ArduinoOTA.begin();
   }
   else
   {
@@ -678,42 +686,17 @@ void activateBLEBeacon()
 }
 */
 
-/*
-void setupDataClientCallbacks()
-{
-  telemetrySender.onConnect([](void *arg, AsyncClient *client)
-                            {
-    Serial.println(F("Connected to data server"));
-    connectedToServer = true; });
-
-  telemetrySender.onDisconnect([](void *arg, AsyncClient *client)
-                               {
-    Serial.println(F("Data sent successfully"));
-    bufferIndex = 0;  // Reset buffer after successful transmission
-    dataTransmissionInProgress = false;
-    client->close(true); });
-
-  telemetrySender.onError([](void *arg, AsyncClient *client, int error)
-                          {
-    Serial.printf(F("Telemetry sender error: %d\n"), error);
-    dataTransmissionInProgress = false; });
-
-  telemetrySender.setNoDelay(true);
-}
-*/
-
 void sendDataBuffer()
 {
   File csvFile;
 
-  if (!wifiConnected)
-  {
-    return;
-  }
-
   Serial.printf("Sending data buffer and writing to local log (%d readings)...\n", bufferIndex);
 
+  JsonDocument jsonPayload;
+  JsonArray readings = jsonPayload["readings"].to<JsonArray>();
+
   bool willWriteToCsv = isCsvAvailable();
+
   if (willWriteToCsv)
   {
     csvFile = LittleFS.open(csvFileName, "a");
@@ -727,31 +710,31 @@ void sendDataBuffer()
   // Send all readings
   for (int i = 0; i < bufferIndex; i++)
   {
-    char csvLine[100] = "";
-    int bytesWritten = snprintf(
-        csvLine,
-        sizeof(csvLine),
-        "\"%lu\",\"%d\",\"%u\",\"%u\"\n",
-        dataBuffer[i].timestamp,
-        dataBuffer[i].temperature,
-        dataBuffer[i].pressure,
-        dataBuffer[i].altitude);
-    if (bytesWritten > sizeof(csvLine))
-    {
-      Serial.printf(F("Warning: csvLine truncated. Attempted length: %d"), bytesWritten);
-    }
+    JsonObject reading = readings.add<JsonObject>();
+    reading["timestamp"] = dataBuffer[i].timestamp;
+    reading["temperature"] = dataBuffer[i].temperature;
+    reading["pressure"] = dataBuffer[i].pressure;
+    reading["altitude"] = dataBuffer[i].altitude;
 
     // record to local CSV flight log
     if (willWriteToCsv)
     {
+      char csvLine[100] = "";
+      int bytesWritten = snprintf(
+          csvLine,
+          sizeof(csvLine),
+          "\"%lu\",\"%d\",\"%u\",\"%u\"\n",
+          dataBuffer[i].timestamp,
+          dataBuffer[i].temperature,
+          dataBuffer[i].pressure,
+          dataBuffer[i].altitude);
+
+      if (bytesWritten > sizeof(csvLine))
+      {
+        Serial.printf(F("Warning: csvLine truncated. Attempted length: %d"), bytesWritten);
+      }
       csvFile.print(csvLine);
     }
-
-    // send as UDP packet to telemetry server
-    const byte *payload = reinterpret_cast<const byte *>(csvLine);
-    telemetrySender.beginPacket(serverAddress, serverPort);
-    telemetrySender.write(payload, strlen(csvLine));
-    telemetrySender.endPacket();
   }
 
   if (willWriteToCsv)
@@ -759,6 +742,23 @@ void sendDataBuffer()
     csvFile.close();
     Serial.println(F("CSV log updated"));
   }
+
+  if (!wifiConnected)
+  {
+    return;
+  }
+
+  // send batch as UDP packet to telemetry server
+  // const byte *payload = reinterpret_cast<const byte *>(csvLine);
+  const uint32_t txStart = millis();
+  telemetrySender.beginPacket(serverAddress, serverPort);
+  // telemetrySender.write(payload, strlen(csvLine));
+  size_t udpBytes = serializeMsgPack(jsonPayload, telemetrySender);
+  // size_t udpBytes = serializeJson(jsonPayload, telemetrySender);
+  telemetrySender.endPacket();
+  const uint32_t txEnd = millis();
+
+  Serial.printf(F("telemetry batch (%u bytes) sent to UDP endpoint in %lu ms\n"), udpBytes, txEnd - txStart);
 }
 
 bool isCsvAvailable()
