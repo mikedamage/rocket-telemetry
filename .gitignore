@@ -10,3 +10,4 @@ debug.txt
 .ycm_extra_conf.pyc
 .ropeproject
 node_modules/
+*.csv
