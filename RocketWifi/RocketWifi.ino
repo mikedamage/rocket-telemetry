@@ -3,7 +3,6 @@
 #include <WiFi.h>
 #include <Wire.h>
 #include <Adafruit_BMP280.h>
-// #include <AsyncTCP.h>
 #include <ArduinoOTA.h>
 #include <WiFiUdp.h>
 #include <ESPAsyncWebServer.h>
@@ -15,8 +14,6 @@
 // #include <BLEUtils.h>
 // #include <BLEBeacon.h>
 // #include <BLEAdvertising.h>
-// #include <CircularBuffer.hpp>
-// #include <assert.h>
 
 #define CONFIG_VERSION 2
 #define DEFAULT_READING_INTERVAL 20
@@ -723,7 +720,7 @@ void sendDataBuffer()
       int bytesWritten = snprintf(
           csvLine,
           sizeof(csvLine),
-          "\"%lu\",\"%d\",\"%u\",\"%u\"\n",
+          "%lu,%d,%u,%u\n",
           dataBuffer[i].timestamp,
           dataBuffer[i].temperature,
           dataBuffer[i].pressure,

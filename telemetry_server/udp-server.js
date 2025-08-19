@@ -15,6 +15,8 @@ const formatter = formatCsv({
   headers: true,
 });
 
+let bytesReceived = 0;
+
 formatter.pipe(telemetryStream);
 
 server.on("listening", () => {
@@ -27,18 +29,17 @@ server.on("error", (err) => {
 });
 
 server.on("message", (msg, rinfo) => {
+  bytesReceived += rinfo.size;
+
   log(`Received ${rinfo.size} bytes from ${rinfo.address}:${rinfo.port}`);
-  // console.log(msg.toString());
+  log(`total bytes received: ${bytesReceived}`);
+
   try {
-    // log(msg.toString().trim());
-    // telemetryStream.write(msg.toString().trim() + "\n");
     const unpacked = decode(msg);
 
     for (const row of unpacked.readings) {
       formatter.write(row);
     }
-
-    log(`${telemetryStream.bytesWritten} bytes written so far`);
   } catch (err) {
     log("error decoding msgpack:");
     console.error(err);
