@@ -38,12 +38,10 @@ const int localPort = 80;  // Port for HTTP API server
 #define BEACON_MAJOR 1
 #define BEACON_MINOR 1
 
-// Landing detection parameters
-const float ALTITUDE_STABILITY_THRESHOLD = 2.0;  // meters
-const unsigned long STABILITY_DURATION = 10000;  // 10 seconds in milliseconds
+NimBLEAdvertising *beaconAdvertising = nullptr;
 
 // Sensor data structure
-const int BUFFER_SIZE = 20;
+const int BUFFER_SIZE = 10;
 int bufferIndex = 0;
 struct SensorReading {
   unsigned long timestamp;  // milliseconds since boot
@@ -81,12 +79,42 @@ bool csvLoggingEnabled = true;
 
 // Status flags
 bool sensorReady = false;
-bool wifiConnected = false;
-bool transmissionEnabled = false;
+volatile bool wifiConnected = false;
+volatile bool transmissionEnabled = false;
 bool dataTransmissionInProgress = false;
 bool beaconActive = false;
+volatile bool enableSoftAP = false;
+bool wifiCallbacksSet = false;
+volatile bool wifiAttemptReconnect = true;
 
 NimBLEBeacon beacon;
+
+void wifiConnectionLost(WiFiEvent_t event) {
+  Serial.println(F("WiFi connection lost!"));
+  wifiConnected = false;
+  wifiAttemptReconnect = !transmissionEnabled;  // don't block onboard flight data recording waiting for a wifi connection
+  enableSoftAP = transmissionEnabled || timeoutElapsed;
+}
+
+void wifiGotIP(WiFiEvent_t event, WiFiEventInfo_t info) {
+  Serial.println("WiFi connected");
+  Serial.print("IP address: ");
+  Serial.println(IPAddress(info.got_ip.ip_info.ip.addr));
+  Serial.print(F("RSSI: "));
+  wifiConnected = true;
+  enableSoftAP = false;
+}
+
+void wifiSoftAPStarted(WiFiEvent_t event) {
+  Serial.println(F("WiFi SoftAP started"));
+  Serial.print(F("SoftAP IP address: "));
+  Serial.println(WiFi.softAPIP());
+  wifiConnected = true;
+}
+
+void wifiGotClient(WiFiEvent_t event, WiFiEventInfo_t info) {
+  Serial.println(F("Client connected to SoftAP"));
+}
 
 void setup() {
   Serial.begin(115200);
@@ -184,9 +212,8 @@ void loop() {
       dataTransmissionInProgress = false;
     }
 
-    // Reconnect WiFi if needed
-    if (!WiFi.isConnected() && wifiConnected) {
-      Serial.println(F("WiFi disconnected, attempting reconnection..."));
+    // Reconnect WiFi if needed, but don't block flight data recording
+    if (!wifiConnected && (wifiAttemptReconnect || enableSoftAP)) {
       connectWiFi();
     }
   }
@@ -257,27 +284,41 @@ void saveConfiguration() {
 }
 
 void connectWiFi() {
-  Serial.print(F("Connecting to WiFi: "));
-  Serial.println(configSSID);
-  WiFi.begin(configSSID.c_str(), configPassword.c_str());
-
-  int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
-    delay(500);
-    Serial.print(F("."));
-    attempts++;
+  if (!wifiCallbacksSet) {
+    WiFi.onEvent(wifiConnectionLost, WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
+    WiFi.onEvent(wifiGotIP, WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_GOT_IP);
+    WiFi.onEvent(wifiSoftAPStarted, WiFiEvent_t::ARDUINO_EVENT_WIFI_AP_START);
+    WiFi.onEvent(wifiGotClient, WiFiEvent_t::ARDUINO_EVENT_WIFI_AP_STACONNECTED);
+    Serial.println(F("WiFi event callbacks set"));
+    wifiCallbacksSet = true;
   }
 
   if (WiFi.status() == WL_CONNECTED) {
-    wifiConnected = true;
-    Serial.println();
-    Serial.println(F("WiFi connected!"));
-    Serial.print(F("IP address: "));
-    Serial.println(WiFi.localIP().toString());
+    return;
+  }
+
+  if (!wifiConnected && enableSoftAP) {
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_AP);
+    WiFi.softAP("RocketWifi-AP");
   } else {
-    wifiConnected = false;
-    Serial.println();
-    Serial.println(F("WiFi connection failed"));
+    Serial.print(F("Connecting to WiFi: "));
+    Serial.println(configSSID);
+    WiFi.begin(configSSID.c_str(), configPassword.c_str());
+
+    int attempts = 0;
+    while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+      delay(500);
+      attempts++;
+    }
+
+    if (WiFi.status() != WL_CONNECTED) {
+      wifiConnected = false;
+      enableSoftAP = true;
+      Serial.println();
+      Serial.println(F("WiFi connection failed. Enabling hotspot."));
+      connectWiFi();  // Retry connection
+    }
   }
 }
 
@@ -584,20 +625,26 @@ void initializeBLE() {
   NimBLEDevice::init("RocketBeacon");
   beacon.setMajor(BEACON_MAJOR);
   beacon.setMinor(BEACON_MINOR);
-  beacon.setSignalPower(0xC5);
-  beacon.setProximityUUID(BLEUUID(BEACON_UUID));
+  beacon.setSignalPower(0xD3);
+  beacon.setProximityUUID(NimBLEUUID(BEACON_UUID));
+  // beacon.setManufacturerId(0x004C); // Apple Inc. iBeacon
+  NimBLEAddress macAddress = NimBLEDevice::getAddress();
+
+  NimBLEAdvertisementData beaconAdvertisementData;
+  beaconAdvertisementData.setFlags(0x04);  // BR_EDR_NOT_SUPPORTED
+  beaconAdvertisementData.setName("RocketBeacon");
+  beaconAdvertisementData.addTxPower();
+  beaconAdvertisementData.setManufacturerData(beacon.getData());
+
+  beaconAdvertising = NimBLEDevice::getAdvertising();
+  beaconAdvertising->setAdvertisingInterval(160);  // 100ms
+  beaconAdvertising->setAdvertisementData(beaconAdvertisementData);
+  Serial.printf(F("BLE beacon initialized. MAC Address: %s\n"), macAddress.toString().c_str());
 }
 
 void activateBLEBeacon() {
   Serial.println(F("Activating BLE beacon for rocket recovery..."));
-  NimBLEAdvertisementData beaconAdvertisementData;
-  beaconAdvertisementData.setFlags(0x04);  // BR_EDR_NOT_SUPPORTED
-  beaconAdvertisementData.addData(beacon.getData());
-
-  NimBLEAdvertising *advertising = NimBLEDevice::getAdvertising();
-  advertising->setAdvertisingInterval(100);  // 100ms
-  advertising->setAdvertisementData(beaconAdvertisementData);
-  advertising->start();
+  beaconAdvertising->start();
   beaconActive = true;
   Serial.println(F("BLE beacon active - rocket can now be located!"));
 }
@@ -608,6 +655,7 @@ void sendDataBuffer() {
 
   Serial.printf("Sending data buffer and writing to local log (%d readings)...\n", bufferIndex);
 
+  dataTransmissionInProgress = true;
   JsonDocument jsonPayload;
   JsonArray readings = jsonPayload["readings"].to<JsonArray>();
 
@@ -654,20 +702,25 @@ void sendDataBuffer() {
   }
 
   if (!wifiConnected) {
+    dataTransmissionInProgress = false;
     return;
   }
 
   // send batch as UDP packet to telemetry server
   // const byte *payload = reinterpret_cast<const byte *>(csvLine);
-  const uint32_t txStart = millis();
+  const uint32_t txStart = micros();
   telemetrySender.beginPacket(serverAddress, serverPort);
   // telemetrySender.write(payload, strlen(csvLine));
   size_t udpBytes = serializeMsgPack(jsonPayload, telemetrySender);
   // size_t udpBytes = serializeJson(jsonPayload, telemetrySender);
   telemetrySender.endPacket();
-  const uint32_t txEnd = millis();
+  const uint32_t txEnd = micros();
+  const uint32_t txDuration = txEnd - txStart;
+  float txRate = udpBytes / (txDuration / 1000.0);  // kilobytes/s
+  dataTransmissionInProgress = false;
 
   Serial.printf(F("telemetry batch (%u bytes) sent to UDP endpoint in %lu ms\n"), udpBytes, txEnd - txStart);
+  Serial.printf(F("Tx rate: %.2f kb/s\n"), txRate);
 }
 
 bool canWriteFlightLog() {
