@@ -2,7 +2,8 @@
 
 #include <WiFi.h>
 #include <Wire.h>
-#include <Adafruit_BMP280.h>
+#include <Adafruit_BME280.h>
+#include <Adafruit_Sensor.h>
 #include <WiFiUdp.h>
 #include <ESPAsyncWebServer.h>
 #include <ArduinoJson.h>
@@ -11,11 +12,13 @@
 #include <Preferences.h>
 #include <NimBLEDevice.h>
 #include <NimBLEBeacon.h>
+#include <TinyPICO.h>
 
 #define CONFIG_VERSION 2
 #define DEFAULT_READING_INTERVAL 20
 #define DEFAULT_SERVER_IP "192.168.1.140"
 #define DEFAULT_REFERENCE_PRESSURE 1013.25
+#define BASELINE_PRESSURE_READINGS 20
 
 // Default configuration values
 const char *DEFAULT_SSID = "***REMOVED***";
@@ -48,6 +51,7 @@ struct SensorReading {
   int16_t temperature;      // Temperature * 100 (to preserve 2 decimal places)
   uint16_t pressure;        // Pressure in hPa (Pa / 100) (to fit in 16-bit)
   uint16_t altitude;        // Altitude in cm (meters * 100)
+  uint16_t humidity;        // Humidity in percent (rh * 100)
 };
 
 SensorReading dataBuffer[BUFFER_SIZE];
@@ -67,9 +71,10 @@ bool forceActivateBeacon = false;
 // Objects
 static WiFiUDP telemetrySender;
 IPAddress serverAddress;
-Adafruit_BMP280 bmp;
+Adafruit_BME280 bme;
 AsyncWebServer server(localPort);
 Preferences preferences;
+TinyPICO tp = TinyPICO();
 
 // File system
 const char *logFileName = "/flight_log.msgpack";
@@ -146,28 +151,24 @@ void setup() {
   // Initialize I2C (TinyPICO uses pins 22 and 21 by default)
   Wire.begin();
 
-  // Initialize BMP280
-  /*
-  if (!bmp.begin(0x76)) {  // Try primary address first
-    if (!bmp.begin(0x77)) {  // Try alternate address
-      Serial.println(F("Could not find BMP280 sensor!"));
-      while (1) delay(10);
-    }
+  // Initialize BME280
+  if (!bme.begin(0x76)) {  // Try primary address first
+    Serial.println(F("Could not find BME280 sensor!"));
+    while (1) delay(10);
   }
 
-  // Configure BMP280 for high-speed readings
-  bmp.setSampling(Adafruit_BMP280::MODE_NORMAL,     // Operating Mode
-                  Adafruit_BMP280::SAMPLING_X2,     // Temp. oversampling
-                  Adafruit_BMP280::SAMPLING_X16,    // Pressure oversampling
-                  Adafruit_BMP280::FILTER_X16,      // Filtering
-                  Adafruit_BMP280::STANDBY_MS_1);   // Standby time
+  // Configure BME280 for high-speed readings
+  bme.setSampling(Adafruit_BME280::MODE_NORMAL,     // Operating Mode
+                  Adafruit_BME280::SAMPLING_X2,    // Temp. oversampling
+                  Adafruit_BME280::SAMPLING_X8,    // Pressure oversampling
+                  Adafruit_BME280::SAMPLING_X1,     // Humidity oversampling
+                  Adafruit_BME280::FILTER_X8,      // Filtering
+                  Adafruit_BME280::STANDBY_MS_0_5);   // Standby time
 
   sensorReady = true;
-  Serial.println(F("BMP280 initialized successfully"));
-  */
 
-  // temp
-  sensorReady = true;
+  // Take several pressure readings to establish a ground reference
+  calibrateAltimeter();
 
   // Connect to WiFi
   connectWiFi();
@@ -252,7 +253,6 @@ void loadConfiguration() {
   configSSID = preferences.getString("ssid", DEFAULT_SSID);
   configPassword = preferences.getString("password", DEFAULT_PASSWORD);
   readingInterval = preferences.getULong("interval", DEFAULT_READING_INTERVAL);
-  groundReferencePressure = preferences.getFloat("ground_reference_pressure", DEFAULT_REFERENCE_PRESSURE);
   serverIP = preferences.getString("server_ip", DEFAULT_SERVER_IP);
   serverPort = preferences.getUShort("server_port", DEFAULT_SERVER_PORT);
   telemetryTimeout = preferences.getULong("telemetry_timeout", DEFAULT_TELEMETRY_TIMEOUT);
@@ -261,7 +261,6 @@ void loadConfiguration() {
   Serial.print(F("SSID: "));
   Serial.println(configSSID);
   Serial.printf(F("Reading interval: %lu ms\n"), readingInterval);
-  Serial.printf(F("Ground reference pressure: %.2f\n"), groundReferencePressure);
   Serial.printf(F("Server address: %s:%d\n"), serverIP, serverPort);
   Serial.printf(F("Telemetry timeout: %lu seconds\n"), telemetryTimeout / (uint32_t)1000);
 
@@ -274,13 +273,37 @@ void saveConfiguration() {
   preferences.putString("ssid", configSSID);
   preferences.putString("password", configPassword);
   preferences.putULong("interval", readingInterval);
-  preferences.putFloat("ground_reference_pressure", groundReferencePressure);
   preferences.putString("server_ip", serverIP);
   preferences.putUShort("server_port", serverPort);
   preferences.putULong("telemetry_timeout", telemetryTimeout);
 
   preferences.end();
   Serial.println(F("Configuration saved to preferences"));
+}
+
+void calibrateAltimeter() {
+  Serial.println(F("Calibrating altimeter to ground reference air pressure."));
+  Serial.printf(F("Averaging %d readings over %.1f seconds"), BASELINE_PRESSURE_READINGS, BASELINE_PRESSURE_READINGS * 0.5);
+
+  float_t baselinePressureReadings[BASELINE_PRESSURE_READINGS];
+  uint8_t baselineReadingIndex = 0;
+
+  while (baselineReadingIndex < BASELINE_PRESSURE_READINGS) {
+    baselinePressureReadings[baselineReadingIndex] = bme.readPressure() / 100.0;
+    baselineReadingIndex++;
+    Serial.print(".");
+    delay(500);
+  }
+
+  float_t baselinePressureSum = 0.0;
+
+  for (uint8_t i = 0; i < BASELINE_PRESSURE_READINGS; i++) {
+    baselinePressureSum += baselinePressureReadings[i];
+  }
+  groundReferencePressure = (baselinePressureSum / (float_t)BASELINE_PRESSURE_READINGS);
+
+  Serial.printf(F("\nGround reference pressure set to %.4f\n"), groundReferencePressure);
+  Serial.println(F("BME280 initialized successfully"));
 }
 
 void connectWiFi() {
@@ -386,20 +409,18 @@ void setupHTTPServer() {
     doc["free_heap"] = ESP.getFreeHeap();
     doc["reading_interval"] = readingInterval;
     doc["ground_reference_pressure"] = groundReferencePressure;
+    doc["battery_voltage"] = tp.GetBatteryVoltage();
 
     if (sensorReady) {
-      /*
-      float temp = bmp.readTemperature();
-      float pressure = bmp.readPressure();
-      float altitude = bmp.readAltitude(groundReferencePressure);
-    */
-      float temp = 22.0;
-      float pressure = groundReferencePressure;
-      float altitude = 0.0;
+      float temp = bme.readTemperature();
+      float pressure = bme.readPressure();
+      float altitude = bme.readAltitude(groundReferencePressure);
+      float humidity = bme.readHumidity();
 
       doc["current_temperature"] = temp;
-      doc["current_pressure"] = pressure;
+      doc["current_pressure"] = pressure / 100.0;
       doc["current_altitude"] = altitude;
+      doc["current_humidity"] = humidity;
     }
 
     String response;
@@ -583,23 +604,20 @@ void takeSensorReading() {
     return;
 
   // Read sensor data
-  /*
-  float temp = bmp.readTemperature();
-  float pressure = bmp.readPressure();
-  float altitude = bmp.readAltitude(groundReferencePressure); // relative to configured ground reference in hPa
-  */
-  float temp = 22.0;
-  float pressure = groundReferencePressure;
-  float altitude = 0.0;
+  float temp = bme.readTemperature() * 100.0F;
+  float pressure = bme.readPressure() / 100.0F; // hPa
+  float altitude = bme.readAltitude(groundReferencePressure) * 100.0F; // relative to configured ground reference in hPa
+  float humidity = bme.readHumidity() * 100.0F;
 
   lastReading = currentTime;
 
   // Convert to 16-bit integers to reduce payload size
   SensorReading reading;
   reading.timestamp = lastReading;
-  reading.temperature = (int16_t)(temp * 100);
-  reading.pressure = (uint16_t)(pressure * 100);
-  reading.altitude = (uint16_t)(altitude * 100);
+  reading.temperature = (int16_t)(temp);
+  reading.pressure = (uint16_t)(pressure);
+  reading.altitude = (uint16_t)(altitude);
+  reading.humidity = (uint16_t)(humidity);
   dataBuffer[bufferIndex] = reading;
   // ringBuffer.push(reading);
 
@@ -607,8 +625,8 @@ void takeSensorReading() {
 
   // Debug output every 25 readings
   if (bufferIndex % 25 == 0) {
-    Serial.printf(F("Reading %d: T=%.2f°C, P=%.0fPa, A=%.2fm (interval: %lums)\n"),
-                  bufferIndex, temp, pressure, altitude, readingInterval);
+    Serial.printf(F("Reading %d: T=%.2f°C, P=%.0fPa, A=%.2fm, RH=%.2f%% (interval: %lums)\n"),
+                  bufferIndex, temp, pressure, altitude, humidity, readingInterval);
   }
 }
 
@@ -676,6 +694,7 @@ void sendDataBuffer() {
     reading["temperature"] = dataBuffer[i].temperature;
     reading["pressure"] = dataBuffer[i].pressure;
     reading["altitude"] = dataBuffer[i].altitude;
+    reading["humidity"] = dataBuffer[i].humidity;
 
     // record to local CSV flight log
     if (willWriteToLog) {
@@ -683,11 +702,12 @@ void sendDataBuffer() {
       int bytesWritten = snprintf(
         csvLine,
         sizeof(csvLine),
-        "%lu,%d,%u,%u\n",
+        "%lu,%d,%u,%u,%u\n",
         dataBuffer[i].timestamp,
         dataBuffer[i].temperature,
         dataBuffer[i].pressure,
-        dataBuffer[i].altitude);
+        dataBuffer[i].altitude,
+        dataBuffer[i].humidity);
 
       if (bytesWritten > sizeof(csvLine)) {
         Serial.printf(F("Warning: csvLine truncated. Attempted length: %d"), bytesWritten);
