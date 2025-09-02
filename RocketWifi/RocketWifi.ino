@@ -91,6 +91,7 @@ bool beaconActive = false;
 volatile bool enableSoftAP = false;
 bool wifiCallbacksSet = false;
 volatile bool wifiAttemptReconnect = true;
+bool forceRecalibrateAltimeter = false;
 
 NimBLEBeacon beacon;
 
@@ -106,6 +107,7 @@ void wifiGotIP(WiFiEvent_t event, WiFiEventInfo_t info) {
   Serial.print("IP address: ");
   Serial.println(IPAddress(info.got_ip.ip_info.ip.addr));
   Serial.print(F("RSSI: "));
+  Serial.println(WiFi.RSSI());
   wifiConnected = true;
   enableSoftAP = false;
 }
@@ -142,7 +144,9 @@ void setup() {
     // Check available space
     size_t totalBytes = LittleFS.totalBytes();
     size_t usedBytes = LittleFS.usedBytes();
+    size_t freeBytes = littlefsFreeSpace();
     Serial.printf("Flash storage: %d/%d bytes used\n", usedBytes, totalBytes);
+    Serial.printf("Free flash storage: %d bytes\n", freeBytes);
   } else {
     Serial.println(F("LittleFS mount failed"));
     fileSystemReady = false;
@@ -152,23 +156,23 @@ void setup() {
   Wire.begin();
 
   // Initialize BME280
-  if (!bme.begin(0x76)) {  // Try primary address first
+  if (bme.begin(0x76)) {  // Try primary address first
+    // Configure BME280 for high-speed readings
+    bme.setSampling(Adafruit_BME280::MODE_NORMAL,     // Operating Mode
+                    Adafruit_BME280::SAMPLING_X2,    // Temp. oversampling
+                    Adafruit_BME280::SAMPLING_X8,    // Pressure oversampling
+                    Adafruit_BME280::SAMPLING_X1,     // Humidity oversampling
+                    Adafruit_BME280::FILTER_X8,      // Filtering
+                    Adafruit_BME280::STANDBY_MS_0_5);   // Standby time
+
+    sensorReady = true;
+
+    // Take several pressure readings to establish a ground reference
+    calibrateAltimeter();
+  } else {
     Serial.println(F("Could not find BME280 sensor!"));
-    while (1) delay(10);
+    Serial.println(F("Proceeding with wifi and HTTP API setup, but no readings will be gathered"));
   }
-
-  // Configure BME280 for high-speed readings
-  bme.setSampling(Adafruit_BME280::MODE_NORMAL,     // Operating Mode
-                  Adafruit_BME280::SAMPLING_X2,    // Temp. oversampling
-                  Adafruit_BME280::SAMPLING_X8,    // Pressure oversampling
-                  Adafruit_BME280::SAMPLING_X1,     // Humidity oversampling
-                  Adafruit_BME280::FILTER_X8,      // Filtering
-                  Adafruit_BME280::STANDBY_MS_0_5);   // Standby time
-
-  sensorReady = true;
-
-  // Take several pressure readings to establish a ground reference
-  calibrateAltimeter();
 
   // Connect to WiFi
   connectWiFi();
@@ -197,6 +201,10 @@ void loop() {
   currentTime = millis();
   checkTelemetryTimeout();
 
+  if (sensorReady && forceRecalibrateAltimeter) {
+    calibrateAltimeter();
+  }
+
   if (!timeoutElapsed && transmissionEnabled) {
     // Normal flight operations
 
@@ -224,6 +232,12 @@ void loop() {
   }
 
   delay(1);  // Small delay to prevent watchdog issues
+}
+
+size_t littlefsFreeSpace() {
+  size_t totalBytes = LittleFS.totalBytes();
+  size_t usedBytes = LittleFS.usedBytes();
+  return totalBytes - usedBytes;
 }
 
 void provisionPreferences() {
@@ -304,6 +318,7 @@ void calibrateAltimeter() {
 
   Serial.printf(F("\nGround reference pressure set to %.4f\n"), groundReferencePressure);
   Serial.println(F("BME280 initialized successfully"));
+  forceRecalibrateAltimeter = false;
 }
 
 void connectWiFi() {
@@ -400,6 +415,7 @@ void setupHTTPServer() {
 
     doc["uptime"] = millis();
     doc["wifi_connected"] = wifiConnected;
+    doc["wifi_rssi"] = WiFi.RSSI();
     doc["sensor_ready"] = sensorReady;
     doc["transmission_enabled"] = transmissionEnabled;
     doc["landing_detected"] = timeoutElapsed;
@@ -407,9 +423,11 @@ void setupHTTPServer() {
     doc["buffer_count"] = bufferIndex;
     doc["buffer_size"] = BUFFER_SIZE;
     doc["free_heap"] = ESP.getFreeHeap();
+    doc["free_flash_storage"] = littlefsFreeSpace();
     doc["reading_interval"] = readingInterval;
     doc["ground_reference_pressure"] = groundReferencePressure;
     doc["battery_voltage"] = tp.GetBatteryVoltage();
+    doc["battery_charging"] = tp.IsChargingBattery();
 
     if (sensorReady) {
       float temp = bme.readTemperature();
@@ -469,6 +487,10 @@ void setupHTTPServer() {
         success = false;
         message = "BLE beacon already active";
       }
+    } else if (command == "recalibrate_altimeter") {
+      forceRecalibrateAltimeter = true;
+      message = "Recalibrating altimeter";
+      success = true;
     } else {
       success = false;
       message = "Unknown command";
