@@ -13,6 +13,7 @@
 #include <NimBLEDevice.h>
 #include <NimBLEBeacon.h>
 #include <TinyPICO.h>
+#include <esp_wifi.h>
 
 #define CONFIG_VERSION 2
 #define DEFAULT_READING_INTERVAL 20
@@ -342,6 +343,11 @@ void connectWiFi() {
   } else {
     Serial.print(F("Connecting to WiFi: "));
     Serial.println(configSSID);
+
+    // Enable Long Range mode for extended WiFi range
+    esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_LR);
+    Serial.println(F("Long Range WiFi mode enabled"));
+
     WiFi.begin(configSSID.c_str(), configPassword.c_str());
 
     int attempts = 0;
