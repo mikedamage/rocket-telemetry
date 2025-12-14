@@ -15,16 +15,16 @@
 #include <TinyPICO.h>
 #include <esp_wifi.h>
 
-#define CONFIG_VERSION 2
+#define CONFIG_VERSION 3
 #define DEFAULT_READING_INTERVAL 20
-#define DEFAULT_SERVER_IP "192.168.1.140"
+#define DEFAULT_SERVER_IP "192.168.4.1"
 #define DEFAULT_REFERENCE_PRESSURE 1013.25
 #define BASELINE_PRESSURE_READINGS 20
 
 // Default configuration values
-const char *DEFAULT_SSID = "***REMOVED***";
-const char *DEFAULT_PASSWORD = "***REMOVED***";
-const uint16_t DEFAULT_SERVER_PORT = 5150;
+const char *DEFAULT_SSID = "RocketTelemetry";
+const char *DEFAULT_PASSWORD = "telemetry123";
+const uint16_t DEFAULT_SERVER_PORT = 4210;
 const uint32_t DEFAULT_TELEMETRY_TIMEOUT = 120000;  // 2 minutes of telemetry
 
 // Network configuration (will be loaded from preferences)
@@ -33,8 +33,8 @@ String configPassword;
 unsigned long readingInterval;
 float_t groundReferencePressure;
 uint32_t telemetryTimeout;
-String serverIP = "192.168.1.140";  // Change to your server IP
-int serverPort = 5150;
+String serverIP = "192.168.4.1";  // Ground station WiFi-LR AP IP address
+int serverPort = 4210;
 const int localPort = 80;  // Port for HTTP API server
 
 // iBeacon UUID for rocket identification (generate your own!)
