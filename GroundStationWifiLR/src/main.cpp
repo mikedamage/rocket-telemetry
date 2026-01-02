@@ -1,41 +1,21 @@
 /**
- * Ground Station WiFi LR - ESP32 Access Point with 802.11 LR Mode
+ * Ground Station WiFi LR - ESP-NOW Version
  *
- * Creates a WiFi AP using ESP32's proprietary 802.11 LR (Long Range) mode
- * and listens for UDP packets containing MsgPack-encoded data,
- * deserializes to JSON, and prints to Serial with newline delimiters.
- *
- * Also receives control commands over serial and forwards them to the rocket's REST API.
- * Command format: "METHOD endpoint 'json_payload'"
- * Example: "POST /calibrate '{"altitude":0}'"
+ * Receives telemetry data from rocket via ESP-NOW and forwards to laptop via USB serial.
+ * Receives control commands from laptop via serial and forwards to rocket via ESP-NOW.
  */
 
 #include <Arduino.h>
-#include <WiFi.h>
-#include <WiFiUdp.h>
-#include <HTTPClient.h>
-#include <esp_wifi.h>
-#include <ArduinoJson.h>
+#include "espnow_comms.h"
+#include "../../shared/espnow_protocol.h"
 
-// Ensure WiFi credentials are defined at build time
-#ifndef WIFI_SSID
-#error "WIFI_SSID must be set as an environment variable"
+// Ensure MAC address is defined at build time
+#ifndef ROCKET_MAC
+#error "ROCKET_MAC must be set as an environment variable (e.g., 0x7C,0xDF,0xA1,0x11,0x22,0x33)"
 #endif
 
-#ifndef WIFI_PSK
-#error "WIFI_PSK must be set as an environment variable"
-#endif
-
-// UDP Configuration
-const uint16_t UDP_PORT = 4210;
-const size_t UDP_BUFFER_SIZE = 512;
-
-// Rocket IP Configuration (typically first client)
-const char* ROCKET_IP = "192.168.4.2";
-const uint16_t ROCKET_HTTP_PORT = 80;
-
-WiFiUDP udp;
-uint8_t packetBuffer[UDP_BUFFER_SIZE];
+// Parse rocket MAC address from build flags
+const uint8_t rocketMacAddress[6] = { ROCKET_MAC };
 
 // Serial command buffer
 const size_t SERIAL_BUFFER_SIZE = 256;
@@ -59,108 +39,65 @@ void logDebug(const char* format, ...) {
 }
 
 /**
- * Log telemetry data to Serial with "DATA: " prefix
+ * Telemetry callback - called when sensor reading is received from rocket
+ *
+ * Formats and outputs as CSV with RSSI column:
+ * DATA: timestamp,temperature,pressure,altitude,humidity,rssi
  */
-void logData(JsonDocument& doc) {
-  Serial.print("DATA: ");
-  serializeJson(doc, Serial);
-  Serial.println();
+void onTelemetryReceived(const SensorReading& reading, int8_t rssi) {
+  // Convert fixed-point integers back to floating point for CSV output
+  float temp = reading.temperature / 100.0f;
+  float pressure = reading.pressure / 1.0f;  // Already in hPa
+  float altitude = reading.altitude / 100.0f;
+  float humidity = reading.humidity / 100.0f;
+
+  // Output CSV format with RSSI as final column
+  Serial.printf("DATA: %lu,%.2f,%.2f,%.2f,%.2f,%d\n",
+                reading.timestamp,
+                temp,
+                pressure,
+                altitude,
+                humidity,
+                rssi);
 }
 
 /**
  * Parse and execute a command from serial
- * Format: "METHOD endpoint 'json_payload'"
- * Example: "POST /calibrate '{\"altitude\":0}'"
+ *
+ * Supported commands (case-insensitive):
+ * - START
+ * - STOP
+ * - RECALIBRATE
+ * - STATS (local command - show statistics)
  */
 void processSerialCommand(const char* command) {
-  logDebug("UART command received: %s", command);
+  // Convert to uppercase for case-insensitive comparison
+  String cmd = String(command);
+  cmd.toUpperCase();
+  cmd.trim();
 
-  char cmdCopy[SERIAL_BUFFER_SIZE];
-  strncpy(cmdCopy, command, SERIAL_BUFFER_SIZE - 1);
-  cmdCopy[SERIAL_BUFFER_SIZE - 1] = '\0';
-
-  // Parse METHOD
-  char* method = strtok(cmdCopy, " ");
-  if (!method) {
-    logDebug("ERROR: No method specified");
-    return;
-  }
-
-  // Parse endpoint
-  char* endpoint = strtok(NULL, " ");
-  if (!endpoint) {
-    logDebug("ERROR: No endpoint specified");
-    return;
-  }
-
-  // Parse JSON payload (everything after endpoint, trimming quotes)
-  char* payload = strtok(NULL, "");
-
-  // Trim leading/trailing whitespace and quotes from payload
-  if (payload) {
-    while (*payload == ' ' || *payload == '\'') payload++;
-    size_t len = strlen(payload);
-    while (len > 0 && (payload[len-1] == ' ' || payload[len-1] == '\'')) {
-      payload[len-1] = '\0';
-      len--;
+  if (cmd == "START") {
+    sendCommand(CommandCode::START);
+  } else if (cmd == "STOP") {
+    sendCommand(CommandCode::STOP);
+  } else if (cmd == "RECALIBRATE") {
+    sendCommand(CommandCode::RECALIBRATE);
+  } else if (cmd == "STATS") {
+    // Local command - show statistics
+    logDebug("Telemetry packets received: %lu", getTelemetryReceivedCount());
+    logDebug("Commands sent: %lu", getCommandsSentCount());
+  } else if (cmd.startsWith("LOCAL")) {
+    // Handle LOCAL status command (compatibility)
+    if (cmd.indexOf("STATUS") >= 0) {
+      logDebug("Ground station MAC: %s", WiFi.macAddress().c_str());
+      logDebug("ESP-NOW channel: %d", ESPNOW_CHANNEL);
+      logDebug("Telemetry received: %lu", getTelemetryReceivedCount());
+      logDebug("Commands sent: %lu", getCommandsSentCount());
     }
+  } else if (cmd.length() > 0) {
+    logDebug("Unknown command: %s", command);
+    logDebug("Valid commands: START, STOP, RECALIBRATE, STATS");
   }
-
-  if (strcmp(method, "LOCAL") == 0) {
-    if (strcmp(endpoint, "status") == 0) {
-      logDebug("WIFI_SSID: %s", WiFi.SSID().c_str());
-      logDebug("WIFI_PSK set? %d", !!WIFI_PSK);
-      logDebug("WIFI_CONNECTED? %d", WiFi.status() == WL_CONNECTED);
-    } else {
-      logDebug("No such local command");
-    }
-    return;
-  }
-
-  // Build URL
-  char url[128];
-  snprintf(url, sizeof(url), "http://%s:%d%s", ROCKET_IP, ROCKET_HTTP_PORT, endpoint);
-
-  // Make HTTP request
-  HTTPClient http;
-  http.begin(url);
-
-  int httpCode = -1;
-
-  if (strcmp(method, "GET") == 0) {
-    httpCode = http.GET();
-  } else if (strcmp(method, "POST") == 0 || strcmp(method, "PUT") == 0) {
-    if (!payload || strlen(payload) == 0) {
-      logDebug("ERROR: %s requires JSON payload", method);
-      http.end();
-      return;
-    }
-    http.addHeader("Content-Type", "application/json");
-    if (strcmp(method, "POST") == 0) {
-      httpCode = http.POST(payload);
-    } else {
-      httpCode = http.PUT(payload);
-    }
-  } else if (strcmp(method, "DELETE") == 0) {
-    httpCode = http.sendRequest("DELETE");
-  } else {
-    logDebug("ERROR: Unknown method '%s'", method);
-    http.end();
-    return;
-  }
-
-  // Handle response
-  if (httpCode > 0) {
-    if (http.getSize() > 0) {
-      logDebug("API Response HTTP %d: %s", httpCode, http.getString().c_str());
-    } else {
-      logDebug("API Response HTTP %d: OK", httpCode);
-    }
-  } else {
-    logDebug("HTTP Request failed: %s", http.errorToString(httpCode).c_str());
-  }
-
-  http.end();
 }
 
 /**
@@ -189,50 +126,27 @@ void setup() {
   Serial.begin(115200);
   delay(100); // Allow serial to stabilize
 
-  logDebug("LOG: Ground Station WiFi LR starting...");
+  logDebug("Ground Station WiFi LR (ESP-NOW) starting...");
 
-  // Configure WiFi for AP mode
-  WiFi.mode(WIFI_AP);
-  logDebug("WiFi mode set to AP");
-  WiFi.enableLongRange(true);
-  logDebug("802.11 LR mode enabled");
-
-  // Start the AP
-  WiFi.softAP(WIFI_SSID, WIFI_PSK, 1, 0, 4);
-  logDebug("WiFi AP started: SSID=%s, IP=%s\n", WIFI_SSID, WiFi.softAPIP().toString().c_str());
-
-
-  // Start UDP server
-  udp.begin(UDP_PORT);
-  logDebug("UDP server listening on port %d\n", UDP_PORT);
+  // Initialize ESP-NOW and register rocket
+  if (!initESPNow(rocketMacAddress, onTelemetryReceived)) {
+    logDebug("FATAL: ESP-NOW initialization failed");
+    while (1) {
+      delay(1000);
+    }
+  }
 
   logDebug("Ground station ready");
+  logDebug("Waiting for telemetry from rocket...");
+  logDebug("Available commands: START, STOP, RECALIBRATE, STATS");
 }
 
 void loop() {
   // Process serial commands from laptop
   processSerialInput();
 
-  // Process UDP telemetry packets from rocket
-  int packetSize = udp.parsePacket();
+  // ESP-NOW telemetry reception is handled via callback (onTelemetryReceived)
+  // No polling needed
 
-  if (packetSize > 0) {
-    int len = udp.read(packetBuffer, UDP_BUFFER_SIZE);
-    if (len > 0) {
-      logDebug("UDP packet received: %d bytes from %s:%d",
-               len, udp.remoteIP().toString().c_str(), udp.remotePort());
-
-      // Deserialize MsgPack to JSON document
-      JsonDocument doc;
-      DeserializationError error = deserializeMsgPack(doc, packetBuffer, len);
-
-      if (!error) {
-        // Serialize to JSON and print to Serial with DATA prefix
-        logData(doc);
-      } else {
-        logDebug("ERROR: MsgPack deserialization failed: %s", error.c_str());
-      }
-    }
-  }
+  delay(1);  // Small delay to prevent watchdog issues
 }
-
