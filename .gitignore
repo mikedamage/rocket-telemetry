@@ -4,11 +4,8 @@ bin/*/
 *build*
 *~
 build-tmp/
-Makefile
-doc/
-debug.txt
-.ycm_extra_conf.pyc
-.ropeproject
+# .ycm_extra_conf.pyc
+# .ropeproject
 node_modules/
 *.csv
 !partitions.csv
