@@ -11,3 +11,6 @@ debug.txt
 .ropeproject
 node_modules/
 *.csv
+!partitions.csv
+.pio
+.envrc

@@ -10,15 +10,21 @@
  * Example: "POST /calibrate '{"altitude":0}'"
  */
 
+#include <Arduino.h>
 #include <WiFi.h>
 #include <WiFiUdp.h>
 #include <HTTPClient.h>
 #include <esp_wifi.h>
 #include <ArduinoJson.h>
 
-// AP Configuration
-const char* AP_SSID = "RocketTelemetry";
-const char* AP_PASSWORD = "telemetry123";
+// Ensure WiFi credentials are defined at build time
+#ifndef WIFI_SSID
+#error "WIFI_SSID must be set as an environment variable"
+#endif
+
+#ifndef WIFI_PSK
+#error "WIFI_PSK must be set as an environment variable"
+#endif
 
 // UDP Configuration
 const uint16_t UDP_PORT = 4210;
@@ -37,11 +43,38 @@ char serialBuffer[SERIAL_BUFFER_SIZE];
 size_t serialBufferIndex = 0;
 
 /**
+ * Log a debug message to Serial with "LOG: " prefix
+ */
+void logDebug(const char* format, ...) {
+  Serial.print("LOG: ");
+
+  va_list args;
+  va_start(args, format);
+
+  char buffer[256];
+  vsnprintf(buffer, sizeof(buffer), format, args);
+  Serial.println(buffer);
+
+  va_end(args);
+}
+
+/**
+ * Log telemetry data to Serial with "DATA: " prefix
+ */
+void logData(JsonDocument& doc) {
+  Serial.print("DATA: ");
+  serializeJson(doc, Serial);
+  Serial.println();
+}
+
+/**
  * Parse and execute a command from serial
  * Format: "METHOD endpoint 'json_payload'"
  * Example: "POST /calibrate '{\"altitude\":0}'"
  */
 void processSerialCommand(const char* command) {
+  logDebug("UART command received: %s", command);
+
   char cmdCopy[SERIAL_BUFFER_SIZE];
   strncpy(cmdCopy, command, SERIAL_BUFFER_SIZE - 1);
   cmdCopy[SERIAL_BUFFER_SIZE - 1] = '\0';
@@ -49,14 +82,14 @@ void processSerialCommand(const char* command) {
   // Parse METHOD
   char* method = strtok(cmdCopy, " ");
   if (!method) {
-    Serial.println("ERROR: No method specified");
+    logDebug("ERROR: No method specified");
     return;
   }
 
   // Parse endpoint
   char* endpoint = strtok(NULL, " ");
   if (!endpoint) {
-    Serial.println("ERROR: No endpoint specified");
+    logDebug("ERROR: No endpoint specified");
     return;
   }
 
@@ -73,6 +106,17 @@ void processSerialCommand(const char* command) {
     }
   }
 
+  if (strcmp(method, "LOCAL") == 0) {
+    if (strcmp(endpoint, "status") == 0) {
+      logDebug("WIFI_SSID: %s", WiFi.SSID().c_str());
+      logDebug("WIFI_PSK set? %d", !!WIFI_PSK);
+      logDebug("WIFI_CONNECTED? %d", WiFi.status() == WL_CONNECTED);
+    } else {
+      logDebug("No such local command");
+    }
+    return;
+  }
+
   // Build URL
   char url[128];
   snprintf(url, sizeof(url), "http://%s:%d%s", ROCKET_IP, ROCKET_HTTP_PORT, endpoint);
@@ -87,7 +131,7 @@ void processSerialCommand(const char* command) {
     httpCode = http.GET();
   } else if (strcmp(method, "POST") == 0 || strcmp(method, "PUT") == 0) {
     if (!payload || strlen(payload) == 0) {
-      Serial.printf("ERROR: %s requires JSON payload\n", method);
+      logDebug("ERROR: %s requires JSON payload", method);
       http.end();
       return;
     }
@@ -100,21 +144,20 @@ void processSerialCommand(const char* command) {
   } else if (strcmp(method, "DELETE") == 0) {
     httpCode = http.sendRequest("DELETE");
   } else {
-    Serial.printf("ERROR: Unknown method '%s'\n", method);
+    logDebug("ERROR: Unknown method '%s'", method);
     http.end();
     return;
   }
 
   // Handle response
   if (httpCode > 0) {
-    Serial.printf("HTTP %d: ", httpCode);
     if (http.getSize() > 0) {
-      Serial.println(http.getString());
+      logDebug("API Response HTTP %d: %s", httpCode, http.getString().c_str());
     } else {
-      Serial.println("OK");
+      logDebug("API Response HTTP %d: OK", httpCode);
     }
   } else {
-    Serial.printf("HTTP Request failed: %s\n", http.errorToString(httpCode).c_str());
+    logDebug("HTTP Request failed: %s", http.errorToString(httpCode).c_str());
   }
 
   http.end();
@@ -136,7 +179,7 @@ void processSerialInput() {
     } else if (serialBufferIndex < SERIAL_BUFFER_SIZE - 1) {
       serialBuffer[serialBufferIndex++] = c;
     } else {
-      Serial.println("ERROR: Command too long");
+      logDebug("ERROR: Command too long");
       serialBufferIndex = 0;
     }
   }
@@ -144,18 +187,26 @@ void processSerialInput() {
 
 void setup() {
   Serial.begin(115200);
+  delay(100); // Allow serial to stabilize
+
+  logDebug("LOG: Ground Station WiFi LR starting...");
 
   // Configure WiFi for AP mode
   WiFi.mode(WIFI_AP);
+  logDebug("WiFi mode set to AP");
+  WiFi.enableLongRange(true);
+  logDebug("802.11 LR mode enabled");
 
   // Start the AP
-  WiFi.softAP(AP_SSID, AP_PASSWORD, 1, 0, 4);
+  WiFi.softAP(WIFI_SSID, WIFI_PSK, 1, 0, 4);
+  logDebug("WiFi AP started: SSID=%s, IP=%s\n", WIFI_SSID, WiFi.softAPIP().toString().c_str());
 
-  // Enable 802.11 LR mode for extended range
-  esp_wifi_set_protocol(WIFI_IF_AP, WIFI_PROTOCOL_LR);
 
   // Start UDP server
   udp.begin(UDP_PORT);
+  logDebug("UDP server listening on port %d\n", UDP_PORT);
+
+  logDebug("Ground station ready");
 }
 
 void loop() {
@@ -168,15 +219,20 @@ void loop() {
   if (packetSize > 0) {
     int len = udp.read(packetBuffer, UDP_BUFFER_SIZE);
     if (len > 0) {
+      logDebug("UDP packet received: %d bytes from %s:%d",
+               len, udp.remoteIP().toString().c_str(), udp.remotePort());
+
       // Deserialize MsgPack to JSON document
       JsonDocument doc;
       DeserializationError error = deserializeMsgPack(doc, packetBuffer, len);
 
       if (!error) {
-        // Serialize to JSON and print to Serial
-        serializeJson(doc, Serial);
-        Serial.println();
+        // Serialize to JSON and print to Serial with DATA prefix
+        logData(doc);
+      } else {
+        logDebug("ERROR: MsgPack deserialization failed: %s", error.c_str());
       }
     }
   }
 }
+
