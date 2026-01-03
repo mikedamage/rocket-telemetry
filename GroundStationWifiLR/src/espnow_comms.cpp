@@ -20,16 +20,19 @@ static void onDataRecv(const esp_now_recv_info_t* info, const uint8_t* data, int
         const SensorReading* reading = reinterpret_cast<const SensorReading*>(data);
         int8_t rssi = info->rx_ctrl->rssi;
 
-        telemetryReceivedCount++;
+        // Use atomic increment instead of deprecated volatile++
+        uint32_t count = telemetryReceivedCount;
+        telemetryReceivedCount = count + 1;
+
         telemetryCallback(*reading, rssi);
     }
 }
 
 /**
- * ESP-NOW send callback
+ * ESP-NOW send callback (ESP32-S3 signature with wifi_tx_info_t)
  * Called after command is sent (success or failure)
  */
-static void onDataSent(const uint8_t* mac, esp_now_send_status_t status) {
+static void onDataSent(const wifi_tx_info_t* info, esp_now_send_status_t status) {
     // Silent operation - don't log every send
     // Could add error counter here if needed
 }
@@ -93,7 +96,9 @@ bool sendCommand(CommandCode cmd) {
     esp_err_t result = esp_now_send(rocketAddress, &cmdByte, sizeof(cmdByte));
 
     if (result == ESP_OK) {
-        commandsSentCount++;
+        // Use atomic increment instead of deprecated volatile++
+        uint32_t count = commandsSentCount;
+        commandsSentCount = count + 1;
 
         // Log command sent
         const char* cmdName = "UNKNOWN";

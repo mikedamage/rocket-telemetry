@@ -1,7 +1,0 @@
-#!/bin/bash
-
-SERVER="${1:-192.168.1.159}"
-
-echo "DELETE http://$SERVER/telemetry.csv"
-
-curl -s -XDELETE http://$SERVER/telemetry.csv | jq .

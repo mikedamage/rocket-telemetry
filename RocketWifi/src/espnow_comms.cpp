@@ -23,7 +23,11 @@ static void onDataRecv(const esp_now_recv_info_t* info, const uint8_t* data, int
         // Validate command code
         if (isValidCommand(cmdByte)) {
             CommandCode cmd = static_cast<CommandCode>(cmdByte);
-            commandsReceivedCount++;
+
+            // Use atomic increment instead of deprecated volatile++
+            uint32_t count = commandsReceivedCount;
+            commandsReceivedCount = count + 1;
+
             commandCallback(cmd);
         } else {
             Serial.printf("Received invalid command code: 0x%02X\n", cmdByte);
@@ -32,12 +36,15 @@ static void onDataRecv(const esp_now_recv_info_t* info, const uint8_t* data, int
 }
 
 /**
- * ESP-NOW send callback
+ * ESP-NOW send callback (ESP32 signature with wifi_tx_info_t)
  * Called after telemetry is sent (success or failure)
  */
-static void onDataSent(const uint8_t* mac, esp_now_send_status_t status) {
+static void onDataSent(const wifi_tx_info_t* info, esp_now_send_status_t status) {
     if (status != ESP_NOW_SEND_SUCCESS) {
-        telemetryFailCount++;
+        // Use atomic increment instead of deprecated volatile++
+        uint32_t count = telemetryFailCount;
+        telemetryFailCount = count + 1;
+
         // Only log failures periodically to avoid flooding serial
         if (telemetryFailCount % 10 == 1) {
             Serial.printf("ESP-NOW send failures: %lu\n", telemetryFailCount);
@@ -104,7 +111,9 @@ bool sendTelemetry(const SensorReading& reading) {
                                      sizeof(SensorReading));
 
     if (result == ESP_OK) {
-        telemetrySentCount++;
+        // Use atomic increment instead of deprecated volatile++
+        uint32_t count = telemetrySentCount;
+        telemetrySentCount = count + 1;
         return true;
     } else {
         // Don't increment telemetryFailCount here - it's counted in onDataSent callback

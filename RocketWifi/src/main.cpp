@@ -25,22 +25,10 @@
 // Parse ground station MAC address from build flags
 const uint8_t groundStationMacAddress[6] = { GROUND_STATION_MAC };
 
-// Configuration from environment variables with defaults
-#ifndef READING_INTERVAL
-#define READING_INTERVAL 20
-#endif
-
-#ifndef TELEMETRY_TIMEOUT
-#define TELEMETRY_TIMEOUT 120000
-#endif
-
-#ifndef GROUND_REFERENCE_PRESSURE
-#define GROUND_REFERENCE_PRESSURE 1013.25f
-#endif
-
-const unsigned long readingInterval = READING_INTERVAL;      // milliseconds between readings
-const uint32_t telemetryTimeout = TELEMETRY_TIMEOUT;         // milliseconds before auto-stop
-float groundReferencePressure = GROUND_REFERENCE_PRESSURE;   // hPa
+// Configuration constants with sensible defaults
+const unsigned long readingInterval = 20;           // milliseconds between readings
+const uint32_t telemetryTimeout = 120000;          // milliseconds before auto-stop (2 minutes)
+float groundReferencePressure = 1013.25f;          // hPa (sea level standard)
 
 // iBeacon UUID for rocket identification
 #define BEACON_UUID "79daf75a-182c-4cc9-ad65-640ad1fd7b3b"
