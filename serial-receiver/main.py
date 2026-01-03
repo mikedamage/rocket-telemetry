@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Serial receiver for rocket telemetry data.
-Listens on a USB serial port and appends CSV data to a file.
-Also provides an interactive command prompt to send control commands
+Serial receiver for rocket telemetry data (ESP-NOW version).
+Listens on a USB serial port connected to the ESP-NOW ground station.
+Appends telemetry CSV data to a file and displays log messages.
+Provides an interactive command prompt to send control commands
 to the rocket via the ground station.
 """
 
 import argparse
 import sys
-import json
 import readline
 import threading
 from pathlib import Path
@@ -22,20 +22,14 @@ telemetry_lock = threading.Lock()
 
 
 class CommandProcessor:
-    """Processes and maps user commands to serial protocol format."""
+    """Processes and maps user commands to ESP-NOW protocol format."""
 
     def __init__(self):
         self.commands = {
-            'status': ('GET', '/status', ''),
-            'get_config': ('GET', '/config', ''),
-            'get_telemetry': ('GET', '/telemetry', ''),
-            'delete_telemetry': ('DELETE', '/telemetry', ''),
-            'start': ('POST', '/command', '{"command": "start"}'),
-            'stop': ('POST', '/command', '{"command": "stop"}'),
-            'reboot': ('POST', '/command', '{"command": "reboot"}'),
-            'reset': ('POST', '/command', '{"command": "reset"}'),
-            'recalibrate_altimeter': ('POST', '/command', '{"command": "recalibrate_altimeter"}'),
-            'start_beacon': ('POST', '/command', '{"command": "start_beacon"}'),
+            'start': 'START',
+            'stop': 'STOP',
+            'recalibrate': 'RECALIBRATE',
+            'stats': 'STATS',
         }
 
     def get_command_list(self):
@@ -43,59 +37,19 @@ class CommandProcessor:
         return sorted(self.commands.keys())
 
     def parse_command(self, user_input):
-        """Parse user input and return serial protocol string."""
-        parts = user_input.strip().split(maxsplit=1)
-        if not parts:
+        """Parse user input and return command string."""
+        cmd = user_input.strip().lower()
+
+        if not cmd:
             return None
-
-        cmd = parts[0].lower()
-
-        # Handle update_config specially (takes arguments)
-        if cmd == 'update_config':
-            if len(parts) < 2:
-                return None, "Usage: update_config {json_config}"
-
-            try:
-                # Validate JSON
-                json.loads(parts[1])
-                return f"PUT /config '{parts[1]}'"
-            except json.JSONDecodeError as e:
-                return None, f"Invalid JSON: {e}"
-
-        # Handle raw API call format: METHOD endpoint payload
-        if cmd.upper() in ['GET', 'POST', 'PUT', 'DELETE']:
-            if len(parts) < 2:
-                return None, f"Usage: {cmd.upper()} /endpoint '{{\"json\":\"payload\"}}'"
-
-            # Parse endpoint and optional payload
-            rest = parts[1].strip()
-            endpoint_parts = rest.split(maxsplit=1)
-            endpoint = endpoint_parts[0]
-            payload = endpoint_parts[1] if len(endpoint_parts) > 1 else "''"
-
-            # Remove quotes if present
-            if payload.startswith("'") and payload.endswith("'"):
-                payload = payload[1:-1]
-
-            # Validate JSON for POST/PUT
-            if cmd.upper() in ['POST', 'PUT']:
-                if not payload:
-                    return None, f"{cmd.upper()} requires JSON payload"
-                try:
-                    json.loads(payload)
-                except json.JSONDecodeError as e:
-                    return None, f"Invalid JSON: {e}"
-
-            return f"{cmd.upper()} {endpoint} '{payload}'"
-
-        # Handle predefined commands
-        if cmd in self.commands:
-            method, endpoint, payload = self.commands[cmd]
-            return f"{method} {endpoint} '{payload}'"
 
         # Handle help
         if cmd in ['help', '?']:
             return None, self.get_help()
+
+        # Handle predefined commands (case-insensitive)
+        if cmd in self.commands:
+            return self.commands[cmd]
 
         return None, f"Unknown command: {cmd}"
 
@@ -103,25 +57,20 @@ class CommandProcessor:
         """Return help message."""
         help_text = [
             "\nAvailable commands:",
-            "  " + ", ".join(self.get_command_list()),
+            "  start        - Start telemetry transmission",
+            "  stop         - Stop telemetry transmission",
+            "  recalibrate  - Recalibrate altimeter baseline",
+            "  stats        - Show ground station statistics",
             "",
             "Special commands:",
-            "  update_config {JSON}  - Update rocket configuration",
-            "  help, ?               - Show this help",
-            "  quit, exit            - Exit the program",
-            "",
-            "Raw API calls:",
-            "  GET /endpoint         - Make GET request",
-            "  POST /endpoint '{}'   - Make POST request with JSON",
-            "  PUT /endpoint '{}'    - Make PUT request with JSON",
-            "  DELETE /endpoint      - Make DELETE request",
+            "  help, ?      - Show this help",
+            "  quit, exit   - Exit the program",
             "",
             "Examples:",
-            "  status",
             "  start",
-            "  update_config {\"reading_interval\": 100}",
-            "  GET /status",
-            "  POST /command '{\"command\": \"start\"}'",
+            "  stop",
+            "  recalibrate",
+            "  stats",
         ]
         return "\n".join(help_text)
 
@@ -132,7 +81,14 @@ def telemetry_reader(ser, csv_path):
 
     packet_count = 0
 
+    # Check if file is new and needs header
+    file_is_new = not csv_path.exists() or csv_path.stat().st_size == 0
+
     with open(csv_path, 'a', encoding='utf-8') as csv_file:
+        # Write CSV header if file is new
+        if file_is_new:
+            csv_file.write("timestamp,temperature,pressure,altitude,humidity,rssi\n")
+            csv_file.flush()
         while running:
             try:
                 # Read line from serial port
@@ -143,9 +99,12 @@ def telemetry_reader(ser, csv_path):
                         # Decode bytes to string and strip whitespace
                         data = line.decode('utf-8', errors='ignore').strip()
 
-                        if data and not data.startswith('HTTP') and not data.startswith('ERROR'):
+                        if data.startswith('DATA: '):
+                            # Extract CSV data after "DATA: " prefix
+                            csv_data = data[6:]  # Skip "DATA: " prefix
+
                             # Write telemetry to CSV file
-                            csv_file.write(data + '\n')
+                            csv_file.write(csv_data + '\n')
                             csv_file.flush()
 
                             packet_count += 1
@@ -153,11 +112,18 @@ def telemetry_reader(ser, csv_path):
 
                             # Log telemetry to stdout
                             with telemetry_lock:
-                                print(f"\r\033[K[{timestamp}] Packet #{packet_count}: {data}")
+                                print(f"\r\033[K[{timestamp}] Packet #{packet_count}: {csv_data}")
                                 print("rocket> ", end='', flush=True)
 
-                        elif data.startswith('HTTP') or data.startswith('ERROR'):
-                            # Print HTTP responses and errors
+                        elif data.startswith('LOG: '):
+                            # Print log messages from ground station
+                            log_msg = data[5:]  # Skip "LOG: " prefix
+                            with telemetry_lock:
+                                print(f"\r\033[K[GS] {log_msg}")
+                                print("rocket> ", end='', flush=True)
+
+                        elif data:
+                            # Print any other output (shouldn't happen normally)
                             with telemetry_lock:
                                 print(f"\r\033[K{data}")
                                 print("rocket> ", end='', flush=True)
@@ -175,7 +141,7 @@ def main():
     global running
 
     parser = argparse.ArgumentParser(
-        description="Interactive rocket telemetry receiver and controller"
+        description="Interactive rocket telemetry receiver and controller (ESP-NOW)"
     )
     parser.add_argument(
         "serial_device",
@@ -204,11 +170,12 @@ def main():
     csv_path = Path(args.csv_file)
     csv_path.parent.mkdir(parents=True, exist_ok=True)
 
-    print(f"Rocket Telemetry Controller")
+    print(f"Rocket Telemetry Controller (ESP-NOW)")
     print("=" * 60)
     print(f"Serial device: {args.serial_device}")
     print(f"CSV output file: {csv_path.absolute()}")
     print(f"Baud rate: {args.baudrate}")
+    print(f"Protocol: ESP-NOW via ground station")
     print("-" * 60)
 
     ser = None
