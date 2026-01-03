@@ -21,13 +21,21 @@
 typedef void (*TelemetryCallback)(const SensorReading &reading, int8_t rssi);
 
 /**
+ * Callback function type for received file chunks
+ * Parameters: FileChunk data
+ */
+typedef void (*FileChunkCallback)(const FileChunk &chunk);
+
+/**
  * Initialize ESP-NOW and register rocket as peer
  *
  * @param rocketMAC MAC address of the rocket (6 bytes)
- * @param callback Function to call when telemetry is received
+ * @param telemetryCallback Function to call when telemetry is received
+ * @param fileChunkCallback Function to call when file chunk is received
  * @return true if initialization successful, false otherwise
  */
-bool initESPNow(const uint8_t *rocketMAC, TelemetryCallback callback);
+bool initESPNow(const uint8_t *rocketMAC, TelemetryCallback telemetryCallback,
+                FileChunkCallback fileChunkCallback);
 
 /**
  * Send a command to the rocket

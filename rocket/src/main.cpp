@@ -54,6 +54,7 @@ bool beaconActive = false;
 bool timeoutElapsed = false;
 bool forceActivateBeacon = false;
 bool forceRecalibrateAltimeter = false;
+bool downloadRequested = false;
 
 // Timing
 unsigned long lastReading = 0;
@@ -69,6 +70,7 @@ void activateBLEBeacon();
 bool createCsvLog();
 size_t littlefsFreeSpace();
 bool canWriteFlightLog();
+void handleFileDownload();
 
 /**
  * ESP-NOW command callback
@@ -90,6 +92,11 @@ void onCommandReceived(CommandCode cmd) {
   case CommandCode::RECALIBRATE:
     forceRecalibrateAltimeter = true;
     Serial.println(F("RECALIBRATE command received"));
+    break;
+
+  case CommandCode::DOWNLOAD:
+    downloadRequested = true;
+    Serial.println(F("DOWNLOAD command received - will send flight log"));
     break;
   }
 }
@@ -168,6 +175,11 @@ void loop() {
 
   if (sensorReady && forceRecalibrateAltimeter) {
     calibrateAltimeter();
+  }
+
+  if (downloadRequested) {
+    handleFileDownload();
+    downloadRequested = false;
   }
 
   if (!timeoutElapsed && transmissionEnabled) {
@@ -350,4 +362,62 @@ bool canWriteFlightLog() {
   }
 
   return true;
+}
+
+void handleFileDownload() {
+  if (!fileSystemReady) {
+    Serial.println(F("Cannot download: file system not ready"));
+    return;
+  }
+
+  if (!LittleFS.exists(csvFileName)) {
+    Serial.println(F("Cannot download: flight log does not exist"));
+    return;
+  }
+
+  File csvFile = LittleFS.open(csvFileName, "r");
+  if (!csvFile) {
+    Serial.println(F("Cannot download: failed to open flight log"));
+    return;
+  }
+
+  size_t fileSize = csvFile.size();
+  Serial.printf("Starting flight log download (%d bytes)\n", fileSize);
+
+  uint16_t sequenceNumber = 0;
+  uint8_t buffer[245];
+  size_t totalBytesSent = 0;
+
+  while (csvFile.available()) {
+    size_t bytesRead = csvFile.read(buffer, sizeof(buffer));
+
+    FileChunk chunk;
+    chunk.packetType = static_cast<uint8_t>(PacketType::FILE_CHUNK);
+    chunk.sequenceNumber = sequenceNumber;
+    chunk.dataLength = bytesRead;
+    memcpy(chunk.data, buffer, bytesRead);
+
+    // Check if this is the last chunk
+    if (!csvFile.available()) {
+      chunk.flags = FILE_CHUNK_FLAG_LAST;
+    } else {
+      chunk.flags = 0;
+    }
+
+    // Send the chunk
+    if (!sendFileChunk(chunk)) {
+      Serial.printf("Failed to send chunk %d\n", sequenceNumber);
+      break;
+    }
+
+    totalBytesSent += bytesRead;
+    sequenceNumber++;
+
+    // Small delay to avoid overwhelming the ESP-NOW buffer
+    delay(5);
+  }
+
+  csvFile.close();
+  Serial.printf("Download complete: %d chunks, %d bytes sent\n", sequenceNumber,
+                totalBytesSent);
 }

@@ -128,6 +128,18 @@ bool sendTelemetry(const SensorReading &reading) {
   }
 }
 
+bool sendFileChunk(const FileChunk &chunk) {
+  esp_err_t result = esp_now_send(groundStationAddress, (const uint8_t *)&chunk,
+                                  sizeof(FileChunk));
+
+  if (result == ESP_OK) {
+    return true;
+  } else {
+    Serial.printf("ESP-NOW file chunk send failed: %d\n", result);
+    return false;
+  }
+}
+
 uint32_t getTelemetrySentCount() { return telemetrySentCount; }
 
 uint32_t getTelemetryFailCount() { return telemetryFailCount; }

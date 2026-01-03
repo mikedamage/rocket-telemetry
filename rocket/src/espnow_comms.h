@@ -38,6 +38,14 @@ bool initESPNow(const uint8_t *groundStationMAC, CommandCallback callback);
 bool sendTelemetry(const SensorReading &reading);
 
 /**
+ * Send a file chunk to the ground station
+ *
+ * @param chunk FileChunk struct to send
+ * @return true if send initiated successfully (does not guarantee delivery)
+ */
+bool sendFileChunk(const FileChunk &chunk);
+
+/**
  * Get ESP-NOW statistics
  */
 uint32_t getTelemetrySentCount();

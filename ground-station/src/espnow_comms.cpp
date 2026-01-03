@@ -6,6 +6,7 @@
 
 // Static variables for callbacks and statistics
 static TelemetryCallback telemetryCallback = nullptr;
+static FileChunkCallback fileChunkCallback = nullptr;
 static uint8_t rocketAddress[6];
 static volatile uint32_t telemetryReceivedCount = 0;
 static volatile uint32_t commandsSentCount = 0;
@@ -16,8 +17,9 @@ static volatile uint32_t commandsSentCount = 0;
  */
 static void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *data,
                        int len) {
-  // Validate packet size
+  // Check packet size to determine type
   if (len == sizeof(SensorReading) && telemetryCallback != nullptr) {
+    // Regular telemetry packet
     const SensorReading *reading =
         reinterpret_cast<const SensorReading *>(data);
     int8_t rssi = info->rx_ctrl->rssi;
@@ -27,6 +29,14 @@ static void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *data,
     telemetryReceivedCount = count + 1;
 
     telemetryCallback(*reading, rssi);
+  } else if (len == sizeof(FileChunk) && fileChunkCallback != nullptr) {
+    // File chunk packet
+    const FileChunk *chunk = reinterpret_cast<const FileChunk *>(data);
+
+    // Verify it's actually a file chunk packet
+    if (chunk->packetType == static_cast<uint8_t>(PacketType::FILE_CHUNK)) {
+      fileChunkCallback(*chunk);
+    }
   }
 }
 
@@ -40,13 +50,15 @@ static void onDataSent(const wifi_tx_info_t *info,
   // Could add error counter here if needed
 }
 
-bool initESPNow(const uint8_t *rocketMAC, TelemetryCallback callback) {
-  if (callback == nullptr) {
+bool initESPNow(const uint8_t *rocketMAC, TelemetryCallback telCallback,
+                FileChunkCallback fileCallback) {
+  if (telCallback == nullptr) {
     Serial.println("LOG: ERROR - Telemetry callback is null");
     return false;
   }
 
-  telemetryCallback = callback;
+  telemetryCallback = telCallback;
+  fileChunkCallback = fileCallback;
   memcpy(rocketAddress, rocketMAC, 6);
 
   // Initialize WiFi in STA mode (required for ESP-NOW)
@@ -117,6 +129,9 @@ bool sendCommand(CommandCode cmd) {
       break;
     case CommandCode::RECALIBRATE:
       cmdName = "RECALIBRATE";
+      break;
+    case CommandCode::DOWNLOAD:
+      cmdName = "DOWNLOAD";
       break;
     }
     Serial.printf("LOG: Command sent: %s\n", cmdName);

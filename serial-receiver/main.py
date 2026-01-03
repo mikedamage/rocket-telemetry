@@ -19,6 +19,8 @@ import serial
 # Global flag for graceful shutdown
 running = True
 telemetry_lock = threading.Lock()
+download_mode = False
+download_buffer = bytearray()
 
 
 class CommandProcessor:
@@ -30,6 +32,7 @@ class CommandProcessor:
             'stop': 'STOP',
             'recalibrate': 'RECALIBRATE',
             'stats': 'STATS',
+            'download': 'DOWNLOAD',
         }
 
     def get_command_list(self):
@@ -60,6 +63,7 @@ class CommandProcessor:
             "  start        - Start telemetry transmission",
             "  stop         - Stop telemetry transmission",
             "  recalibrate  - Recalibrate altimeter baseline",
+            "  download     - Download flight log from rocket",
             "  stats        - Show ground station statistics",
             "",
             "Special commands:",
@@ -70,6 +74,7 @@ class CommandProcessor:
             "  start",
             "  stop",
             "  recalibrate",
+            "  download",
             "  stats",
         ]
         return "\n".join(help_text)
@@ -77,7 +82,7 @@ class CommandProcessor:
 
 def telemetry_reader(ser, csv_path):
     """Background thread to read telemetry data from serial."""
-    global running
+    global running, download_mode, download_buffer
 
     packet_count = 0
 
@@ -96,40 +101,62 @@ def telemetry_reader(ser, csv_path):
                     line = ser.readline()
 
                     if line:
-                        # Decode bytes to string and strip whitespace
-                        data = line.decode('utf-8', errors='ignore').strip()
+                        # Try to decode as text first
+                        try:
+                            data = line.decode('utf-8', errors='strict').strip()
 
-                        if data.startswith('DATA: '):
-                            # Extract CSV data after "DATA: " prefix
-                            csv_data = data[6:]  # Skip "DATA: " prefix
+                            if data.startswith('DATA: '):
+                                # Extract CSV data after "DATA: " prefix
+                                csv_data = data[6:]  # Skip "DATA: " prefix
 
-                            # Write telemetry to CSV file
-                            csv_file.write(csv_data + '\n')
-                            csv_file.flush()
+                                # Write telemetry to CSV file
+                                csv_file.write(csv_data + '\n')
+                                csv_file.flush()
 
-                            packet_count += 1
-                            timestamp = datetime.now().strftime('%H:%M:%S.%f')[:-3]
+                                packet_count += 1
+                                timestamp = datetime.now().strftime('%H:%M:%S.%f')[:-3]
 
-                            # Log telemetry to stdout
-                            with telemetry_lock:
-                                print(f"\r\033[K[{timestamp}] Packet #{packet_count}: {csv_data}")
-                                print("rocket> ", end='', flush=True)
+                                # Log telemetry to stdout
+                                with telemetry_lock:
+                                    print(f"\r\033[K[{timestamp}] Packet #{packet_count}: {csv_data}")
+                                    print("rocket> ", end='', flush=True)
 
-                        elif data.startswith('LOG: '):
-                            # Print log messages from ground station
-                            log_msg = data[5:]  # Skip "LOG: " prefix
-                            with telemetry_lock:
-                                print(f"\r\033[K[GS] {log_msg}")
-                                print("rocket> ", end='', flush=True)
+                            elif data.startswith('LOG: '):
+                                # Print log messages from ground station
+                                log_msg = data[5:]  # Skip "LOG: " prefix
 
-                        elif data:
-                            # Print any other output (shouldn't happen normally)
-                            with telemetry_lock:
-                                print(f"\r\033[K{data}")
-                                print("rocket> ", end='', flush=True)
+                                # Check if download is complete
+                                if "File download complete" in log_msg and download_mode:
+                                    download_mode = False
 
-            except UnicodeDecodeError:
-                continue
+                                    # Save downloaded file
+                                    download_path = csv_path.parent / f"downloaded_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+                                    with open(download_path, 'wb') as f:
+                                        f.write(download_buffer)
+
+                                    with telemetry_lock:
+                                        print(f"\r\033[K[GS] {log_msg}")
+                                        print(f"\r\033[K[DOWNLOAD] Saved to: {download_path}")
+                                        print(f"\r\033[K[DOWNLOAD] Size: {len(download_buffer)} bytes")
+                                        print("rocket> ", end='', flush=True)
+
+                                    download_buffer.clear()
+                                else:
+                                    with telemetry_lock:
+                                        print(f"\r\033[K[GS] {log_msg}")
+                                        print("rocket> ", end='', flush=True)
+
+                            elif data:
+                                # Print any other output (shouldn't happen normally)
+                                with telemetry_lock:
+                                    print(f"\r\033[K{data}")
+                                    print("rocket> ", end='', flush=True)
+
+                        except UnicodeDecodeError:
+                            # Binary data - likely file download chunk
+                            if download_mode:
+                                download_buffer.extend(line)
+
             except Exception as e:
                 if running:
                     with telemetry_lock:
@@ -236,6 +263,12 @@ def main():
                     command_str = result + '\n'
                     ser.write(command_str.encode('utf-8'))
                     ser.flush()
+
+                    # Enable download mode if this is a download command
+                    if result == 'DOWNLOAD':
+                        download_mode = True
+                        download_buffer.clear()
+                        print("[DOWNLOAD] Download initiated, waiting for data...")
                 else:
                     # Empty result
                     print("Invalid command. Type 'help' for usage.")

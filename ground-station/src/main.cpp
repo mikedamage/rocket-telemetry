@@ -59,12 +59,28 @@ void onTelemetryReceived(const SensorReading &reading, int8_t rssi) {
 }
 
 /**
+ * File chunk callback - called when file chunk is received from rocket
+ *
+ * Forwards the chunk data to the laptop via serial
+ */
+void onFileChunkReceived(const FileChunk &chunk) {
+  // Write chunk data directly to serial
+  Serial.write(chunk.data, chunk.dataLength);
+
+  // If this is the last chunk, log completion
+  if (chunk.flags & FILE_CHUNK_FLAG_LAST) {
+    logDebug("File download complete (chunk %d)", chunk.sequenceNumber);
+  }
+}
+
+/**
  * Parse and execute a command from serial
  *
  * Supported commands (case-insensitive):
  * - START
  * - STOP
  * - RECALIBRATE
+ * - DOWNLOAD
  * - STATS (local command - show statistics)
  */
 void processSerialCommand(const char *command) {
@@ -79,6 +95,8 @@ void processSerialCommand(const char *command) {
     sendCommand(CommandCode::STOP);
   } else if (cmd == "RECALIBRATE") {
     sendCommand(CommandCode::RECALIBRATE);
+  } else if (cmd == "DOWNLOAD") {
+    sendCommand(CommandCode::DOWNLOAD);
   } else if (cmd == "STATS") {
     // Local command - show statistics
     logDebug("Telemetry packets received: %lu", getTelemetryReceivedCount());
@@ -93,7 +111,7 @@ void processSerialCommand(const char *command) {
     }
   } else if (cmd.length() > 0) {
     logDebug("Unknown command: %s", command);
-    logDebug("Valid commands: START, STOP, RECALIBRATE, STATS");
+    logDebug("Valid commands: START, STOP, RECALIBRATE, DOWNLOAD, STATS");
   }
 }
 
@@ -126,7 +144,7 @@ void setup() {
   logDebug("Ground Station WiFi LR (ESP-NOW) starting...");
 
   // Initialize ESP-NOW and register rocket
-  if (!initESPNow(rocketMacAddress, onTelemetryReceived)) {
+  if (!initESPNow(rocketMacAddress, onTelemetryReceived, onFileChunkReceived)) {
     logDebug("FATAL: ESP-NOW initialization failed");
     while (1) {
       delay(1000);
@@ -135,7 +153,7 @@ void setup() {
 
   logDebug("Ground station ready");
   logDebug("Waiting for telemetry from rocket...");
-  logDebug("Available commands: START, STOP, RECALIBRATE, STATS");
+  logDebug("Available commands: START, STOP, RECALIBRATE, DOWNLOAD, STATS");
 }
 
 void loop() {
