@@ -1,21 +1,23 @@
 /**
  * Ground Station WiFi LR - ESP-NOW Version
  *
- * Receives telemetry data from rocket via ESP-NOW and forwards to laptop via USB serial.
- * Receives control commands from laptop via serial and forwards to rocket via ESP-NOW.
+ * Receives telemetry data from rocket via ESP-NOW and forwards to laptop via
+ * USB serial. Receives control commands from laptop via serial and forwards to
+ * rocket via ESP-NOW.
  */
 
-#include <Arduino.h>
-#include "espnow_comms.h"
 #include "../../shared/espnow_protocol.h"
+#include "espnow_comms.h"
+#include <Arduino.h>
 
 // Ensure MAC address is defined at build time
 #ifndef ROCKET_MAC
-#error "ROCKET_MAC must be set as an environment variable (e.g., 0x7C,0xDF,0xA1,0x11,0x22,0x33)"
+#error                                                                         \
+    "ROCKET_MAC must be set as an environment variable (e.g., 0x7C,0xDF,0xA1,0x11,0x22,0x33)"
 #endif
 
 // Parse rocket MAC address from build flags
-const uint8_t rocketMacAddress[6] = { ROCKET_MAC };
+const uint8_t rocketMacAddress[6] = {ROCKET_MAC};
 
 // Serial command buffer
 const size_t SERIAL_BUFFER_SIZE = 256;
@@ -25,7 +27,7 @@ size_t serialBufferIndex = 0;
 /**
  * Log a debug message to Serial with "LOG: " prefix
  */
-void logDebug(const char* format, ...) {
+void logDebug(const char *format, ...) {
   Serial.print("LOG: ");
 
   va_list args;
@@ -44,21 +46,16 @@ void logDebug(const char* format, ...) {
  * Formats and outputs as CSV with RSSI column:
  * DATA: timestamp,temperature,pressure,altitude,humidity,rssi
  */
-void onTelemetryReceived(const SensorReading& reading, int8_t rssi) {
+void onTelemetryReceived(const SensorReading &reading, int8_t rssi) {
   // Convert fixed-point integers back to floating point for CSV output
   float temp = reading.temperature / 100.0f;
-  float pressure = reading.pressure / 1.0f;  // Already in hPa
+  float pressure = reading.pressure / 1.0f; // Already in hPa
   float altitude = reading.altitude / 100.0f;
   float humidity = reading.humidity / 100.0f;
 
   // Output CSV format with RSSI as final column
-  Serial.printf("DATA: %lu,%.2f,%.2f,%.2f,%.2f,%d\n",
-                reading.timestamp,
-                temp,
-                pressure,
-                altitude,
-                humidity,
-                rssi);
+  Serial.printf("DATA: %lu,%.2f,%.2f,%.2f,%.2f,%d\n", reading.timestamp, temp,
+                pressure, altitude, humidity, rssi);
 }
 
 /**
@@ -70,7 +67,7 @@ void onTelemetryReceived(const SensorReading& reading, int8_t rssi) {
  * - RECALIBRATE
  * - STATS (local command - show statistics)
  */
-void processSerialCommand(const char* command) {
+void processSerialCommand(const char *command) {
   // Convert to uppercase for case-insensitive comparison
   String cmd = String(command);
   cmd.toUpperCase();
@@ -148,5 +145,5 @@ void loop() {
   // ESP-NOW telemetry reception is handled via callback (onTelemetryReceived)
   // No polling needed
 
-  delay(1);  // Small delay to prevent watchdog issues
+  delay(1); // Small delay to prevent watchdog issues
 }

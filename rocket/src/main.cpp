@@ -6,16 +6,16 @@
  * Activates BLE beacon after timeout for rocket recovery.
  */
 
-#include <Arduino.h>
-#include <Wire.h>
+#include "../../shared/espnow_protocol.h"
+#include "espnow_comms.h"
 #include <Adafruit_BME280.h>
 #include <Adafruit_Sensor.h>
+#include <Arduino.h>
 #include <LittleFS.h>
-#include <NimBLEDevice.h>
 #include <NimBLEBeacon.h>
+#include <NimBLEDevice.h>
 #include <TinyPICO.h>
-#include "espnow_comms.h"
-#include "../../shared/espnow_protocol.h"
+#include <Wire.h>
 
 // Ensure MAC address is defined at build time
 #ifndef GROUND_STATION_MAC
@@ -23,12 +23,13 @@
 #endif
 
 // Parse ground station MAC address from build flags
-const uint8_t groundStationMacAddress[6] = { GROUND_STATION_MAC };
+const uint8_t groundStationMacAddress[6] = {GROUND_STATION_MAC};
 
 // Configuration constants with sensible defaults
-const unsigned long readingInterval = 20;           // milliseconds between readings
-const uint32_t telemetryTimeout = 120000;          // milliseconds before auto-stop (2 minutes)
-float groundReferencePressure = 1013.25f;          // hPa (sea level standard)
+const unsigned long readingInterval = 20; // milliseconds between readings
+const uint32_t telemetryTimeout =
+    120000; // milliseconds before auto-stop (2 minutes)
+float groundReferencePressure = 1013.25f; // hPa (sea level standard)
 
 // iBeacon UUID for rocket identification
 #define BEACON_UUID "79daf75a-182c-4cc9-ad65-640ad1fd7b3b"
@@ -75,27 +76,27 @@ bool canWriteFlightLog();
  */
 void onCommandReceived(CommandCode cmd) {
   switch (cmd) {
-    case CommandCode::START:
-      transmissionEnabled = true;
-      telemetryStartTime = millis();
-      Serial.println(F("START command received - telemetry enabled"));
-      break;
+  case CommandCode::START:
+    transmissionEnabled = true;
+    telemetryStartTime = millis();
+    Serial.println(F("START command received - telemetry enabled"));
+    break;
 
-    case CommandCode::STOP:
-      transmissionEnabled = false;
-      Serial.println(F("STOP command received - telemetry disabled"));
-      break;
+  case CommandCode::STOP:
+    transmissionEnabled = false;
+    Serial.println(F("STOP command received - telemetry disabled"));
+    break;
 
-    case CommandCode::RECALIBRATE:
-      forceRecalibrateAltimeter = true;
-      Serial.println(F("RECALIBRATE command received"));
-      break;
+  case CommandCode::RECALIBRATE:
+    forceRecalibrateAltimeter = true;
+    Serial.println(F("RECALIBRATE command received"));
+    break;
   }
 }
 
 void setup() {
   Serial.begin(115200);
-  delay(100);  // Brief delay for serial to initialize, but don't block
+  delay(100); // Brief delay for serial to initialize, but don't block
 
   Serial.println(F("TinyPICO Rocket Telemetry System (ESP-NOW) Starting..."));
 
@@ -124,12 +125,12 @@ void setup() {
   // Initialize BME280
   if (bme.begin(0x76)) {
     // Configure BME280 for high-speed readings
-    bme.setSampling(Adafruit_BME280::MODE_NORMAL,      // Operating Mode
-                    Adafruit_BME280::SAMPLING_X2,      // Temp. oversampling
-                    Adafruit_BME280::SAMPLING_X8,      // Pressure oversampling
-                    Adafruit_BME280::SAMPLING_X1,      // Humidity oversampling
-                    Adafruit_BME280::FILTER_X8,        // Filtering
-                    Adafruit_BME280::STANDBY_MS_0_5);  // Standby time
+    bme.setSampling(Adafruit_BME280::MODE_NORMAL,     // Operating Mode
+                    Adafruit_BME280::SAMPLING_X2,     // Temp. oversampling
+                    Adafruit_BME280::SAMPLING_X8,     // Pressure oversampling
+                    Adafruit_BME280::SAMPLING_X1,     // Humidity oversampling
+                    Adafruit_BME280::FILTER_X8,       // Filtering
+                    Adafruit_BME280::STANDBY_MS_0_5); // Standby time
 
     sensorReady = true;
 
@@ -137,7 +138,8 @@ void setup() {
     calibrateAltimeter();
   } else {
     Serial.println(F("Could not find BME280 sensor!"));
-    Serial.println(F("Proceeding with ESP-NOW setup, but no readings will be gathered"));
+    Serial.println(
+        F("Proceeding with ESP-NOW setup, but no readings will be gathered"));
   }
 
   Serial.print(F("Battery voltage: "));
@@ -181,7 +183,7 @@ void loop() {
     activateBLEBeacon();
   }
 
-  delay(1);  // Small delay to prevent watchdog issues
+  delay(1); // Small delay to prevent watchdog issues
 }
 
 size_t littlefsFreeSpace() {
@@ -224,9 +226,11 @@ void calibrateAltimeter() {
   for (uint8_t i = 0; i < BASELINE_PRESSURE_READINGS; i++) {
     baselinePressureSum += baselinePressureReadings[i];
   }
-  groundReferencePressure = baselinePressureSum / (float)BASELINE_PRESSURE_READINGS;
+  groundReferencePressure =
+      baselinePressureSum / (float)BASELINE_PRESSURE_READINGS;
 
-  Serial.printf(F("\nGround reference pressure set to %.4f hPa\n"), groundReferencePressure);
+  Serial.printf(F("\nGround reference pressure set to %.4f hPa\n"),
+                groundReferencePressure);
   Serial.println(F("BME280 initialized successfully"));
   forceRecalibrateAltimeter = false;
 }
@@ -237,8 +241,9 @@ void takeSensorReading() {
 
   // Read sensor data
   float temp = bme.readTemperature() * 100.0F;
-  float pressure = bme.readPressure() / 100.0F;                         // hPa
-  float altitude = bme.readAltitude(groundReferencePressure) * 100.0F;  // relative to configured ground reference
+  float pressure = bme.readPressure() / 100.0F; // hPa
+  float altitude = bme.readAltitude(groundReferencePressure) *
+                   100.0F; // relative to configured ground reference
   float humidity = bme.readHumidity() * 100.0F;
 
   lastReading = currentTime;
@@ -248,7 +253,8 @@ void takeSensorReading() {
   reading.timestamp = lastReading;
   reading.temperature = (int16_t)temp;
   reading.pressure = (uint16_t)pressure;
-  // Clamp altitude to 0 for negative values (pressure fluctuations at ground level)
+  // Clamp altitude to 0 for negative values (pressure fluctuations at ground
+  // level)
   reading.altitude = (uint16_t)(altitude < 0 ? 0 : altitude);
   reading.humidity = (uint16_t)humidity;
 
@@ -256,7 +262,8 @@ void takeSensorReading() {
   if (!sendTelemetry(reading)) {
     // Log failures periodically
     if (getTelemetryFailCount() % 10 == 1) {
-      Serial.printf("ESP-NOW send failed (total failures: %lu)\n", getTelemetryFailCount());
+      Serial.printf("ESP-NOW send failed (total failures: %lu)\n",
+                    getTelemetryFailCount());
     }
   }
 
@@ -265,11 +272,8 @@ void takeSensorReading() {
     File csvFile = LittleFS.open(csvFileName, "a");
     if (csvFile) {
       char csvLine[100];
-      snprintf(csvLine, sizeof(csvLine), "%lu,%d,%u,%u,%u\n",
-               reading.timestamp,
-               reading.temperature,
-               reading.pressure,
-               reading.altitude,
+      snprintf(csvLine, sizeof(csvLine), "%lu,%d,%u,%u,%u\n", reading.timestamp,
+               reading.temperature, reading.pressure, reading.altitude,
                reading.humidity);
       csvFile.print(csvLine);
       csvFile.close();
@@ -280,19 +284,17 @@ void takeSensorReading() {
   static uint32_t readingCount = 0;
   readingCount++;
   if (readingCount % 25 == 0) {
-    Serial.printf(F("Reading #%lu: T=%.2f°C, P=%.0fhPa, A=%.2fm, RH=%.2f%% (sent: %lu, failed: %lu)\n"),
-                  readingCount,
-                  temp / 100.0,
-                  pressure,
-                  altitude / 100.0,
-                  humidity / 100.0,
-                  getTelemetrySentCount(),
+    Serial.printf(F("Reading #%lu: T=%.2f°C, P=%.0fhPa, A=%.2fm, RH=%.2f%% "
+                    "(sent: %lu, failed: %lu)\n"),
+                  readingCount, temp / 100.0, pressure, altitude / 100.0,
+                  humidity / 100.0, getTelemetrySentCount(),
                   getTelemetryFailCount());
   }
 }
 
 void checkTelemetryTimeout() {
-  if (transmissionEnabled && currentTime - telemetryStartTime >= telemetryTimeout) {
+  if (transmissionEnabled &&
+      currentTime - telemetryStartTime >= telemetryTimeout) {
     Serial.println(F("Telemetry timeout elapsed. Stopping transmission."));
     timeoutElapsed = true;
     transmissionEnabled = false;
@@ -310,15 +312,16 @@ void initializeBLE() {
   NimBLEAddress macAddress = NimBLEDevice::getAddress();
 
   NimBLEAdvertisementData beaconAdvertisementData;
-  beaconAdvertisementData.setFlags(0x04);  // BR_EDR_NOT_SUPPORTED
+  beaconAdvertisementData.setFlags(0x04); // BR_EDR_NOT_SUPPORTED
   beaconAdvertisementData.setName("RocketBeacon");
   beaconAdvertisementData.addTxPower();
   beaconAdvertisementData.setManufacturerData(beacon.getData());
 
   beaconAdvertising = NimBLEDevice::getAdvertising();
-  beaconAdvertising->setAdvertisingInterval(160);  // 100ms
+  beaconAdvertising->setAdvertisingInterval(160); // 100ms
   beaconAdvertising->setAdvertisementData(beaconAdvertisementData);
-  Serial.printf(F("BLE beacon initialized. MAC Address: %s\n"), macAddress.toString().c_str());
+  Serial.printf(F("BLE beacon initialized. MAC Address: %s\n"),
+                macAddress.toString().c_str());
 }
 
 void activateBLEBeacon() {
@@ -340,7 +343,7 @@ bool canWriteFlightLog() {
   // Estimate space needed (roughly 50 bytes per reading)
   size_t estimatedBytes = 50;
 
-  if (freeBytes < estimatedBytes + 1000) {  // Keep 1KB buffer
+  if (freeBytes < estimatedBytes + 1000) { // Keep 1KB buffer
     Serial.println(F("Flash storage full - stopping CSV logging"));
     csvLoggingEnabled = false;
     return false;

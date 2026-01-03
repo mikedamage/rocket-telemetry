@@ -8,11 +8,11 @@
 #ifndef ESPNOW_COMMS_H
 #define ESPNOW_COMMS_H
 
+#include "../../shared/espnow_protocol.h"
 #include <Arduino.h>
+#include <WiFi.h>
 #include <esp_now.h>
 #include <esp_wifi.h>
-#include <WiFi.h>
-#include "../../shared/espnow_protocol.h"
 
 /**
  * Callback function type for received commands
@@ -27,7 +27,7 @@ typedef void (*CommandCallback)(CommandCode cmd);
  * @param callback Function to call when command is received
  * @return true if initialization successful, false otherwise
  */
-bool initESPNow(const uint8_t* groundStationMAC, CommandCallback callback);
+bool initESPNow(const uint8_t *groundStationMAC, CommandCallback callback);
 
 /**
  * Send a telemetry reading to the ground station
@@ -35,7 +35,7 @@ bool initESPNow(const uint8_t* groundStationMAC, CommandCallback callback);
  * @param reading SensorReading struct to send
  * @return true if send initiated successfully (does not guarantee delivery)
  */
-bool sendTelemetry(const SensorReading& reading);
+bool sendTelemetry(const SensorReading &reading);
 
 /**
  * Get ESP-NOW statistics

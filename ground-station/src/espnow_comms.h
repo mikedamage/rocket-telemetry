@@ -8,17 +8,17 @@
 #ifndef ESPNOW_COMMS_H
 #define ESPNOW_COMMS_H
 
+#include "../../shared/espnow_protocol.h"
 #include <Arduino.h>
+#include <WiFi.h>
 #include <esp_now.h>
 #include <esp_wifi.h>
-#include <WiFi.h>
-#include "../../shared/espnow_protocol.h"
 
 /**
  * Callback function type for received telemetry
  * Parameters: SensorReading data, RSSI value
  */
-typedef void (*TelemetryCallback)(const SensorReading& reading, int8_t rssi);
+typedef void (*TelemetryCallback)(const SensorReading &reading, int8_t rssi);
 
 /**
  * Initialize ESP-NOW and register rocket as peer
@@ -27,7 +27,7 @@ typedef void (*TelemetryCallback)(const SensorReading& reading, int8_t rssi);
  * @param callback Function to call when telemetry is received
  * @return true if initialization successful, false otherwise
  */
-bool initESPNow(const uint8_t* rocketMAC, TelemetryCallback callback);
+bool initESPNow(const uint8_t *rocketMAC, TelemetryCallback callback);
 
 /**
  * Send a command to the rocket
