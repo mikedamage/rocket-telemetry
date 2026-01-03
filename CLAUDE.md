@@ -27,9 +27,23 @@ The rocket is an Estes Cosmic Cargo rocket kit. It weighs 36 grams without paylo
 - Each reading will be converted to a CSV string and appended to the CSV file specified at runtime.
 - The data logger program will also listen for simple text commands on stdin and send them to the ground station ESP to be relayed to the rocket.
 
+# Project Structure
+
+- `./rocket` contains the PlatformIO project for the rocket's firmware
+- `./ground-station` contains the PlatformIO project for the ground station relay firmware
+- `./serial-receiver` is the Python serial port telemetry receiver and control command client
+
 # Workflow
+
+## USB serial devices
+
+Boards appear as the following device paths when plugged in via USB:
+
+- Rocket: `/dev/cu.usbserial-02527E88`
+- Ground station: `/dev/cu.usbmodem1101`
 
 ## Commands
 
-- Compile the rocket code: `cd RocketWifi && source .venv/bin/activate && pio run`
-- Compile ground station code: `cd GroundStationWifiLR && source .venv/bin/activate && pio run`
+- Compile the rocket code: `cd rocket && uv run pio run`
+- Compile ground station code: `cd ground-station && uv run pio run`
+- Boards are flashed using `cd [BOARD_FIRMWARE] && uv run pio run -t upload --upload-port=[BOARD_USB_SERIAL_DEVICE]` to disambiguate which board you're flashing. Refer to the devices listed in the previous section for `BOARD_USB_SERIAL_DEVICE` values

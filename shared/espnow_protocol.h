@@ -11,23 +11,22 @@
 #include <Arduino.h>
 
 /**
- * Sensor reading data packet (12 bytes)
+ * Sensor reading data packet (20 bytes)
  *
  * Transmitted from rocket to ground station via ESP-NOW.
- * Uses fixed-point integers to preserve precision while minimizing payload
- * size.
+ * Uses native float types for full precision.
  */
 struct __attribute__((packed)) SensorReading {
-  uint32_t timestamp;  // Milliseconds since boot
-  int16_t temperature; // Temperature * 100 (e.g., 2550 = 25.50°C)
-  uint16_t pressure;   // Pressure in hPa (e.g., 1013 = 1013 hPa)
-  uint16_t altitude;   // Altitude in cm (e.g., 12050 = 120.50m)
-  uint16_t humidity;   // Humidity * 100 (e.g., 6500 = 65.00%)
+  uint32_t timestamp; // Milliseconds since boot
+  float temperature;  // Temperature in °C
+  float pressure;     // Pressure in hPa
+  float altitude;     // Altitude in meters (relative to ground reference)
+  float humidity;     // Relative humidity in %
 };
 
-// Compile-time verification that struct is exactly 12 bytes
-static_assert(sizeof(SensorReading) == 12,
-              "SensorReading must be exactly 12 bytes");
+// Compile-time verification that struct is exactly 20 bytes
+static_assert(sizeof(SensorReading) == 20,
+              "SensorReading must be exactly 20 bytes");
 
 /**
  * Packet type identifiers
@@ -68,7 +67,8 @@ enum class CommandCode : uint8_t {
   START = 0x01,       // Start telemetry transmission
   STOP = 0x02,        // Stop telemetry transmission
   RECALIBRATE = 0x03, // Recalibrate altimeter baseline
-  DOWNLOAD = 0x04     // Download flight log from rocket
+  DOWNLOAD = 0x04,    // Download flight log from rocket
+  TRUNCATE = 0x05     // Delete and recreate flight log file
 };
 
 /**
@@ -78,13 +78,14 @@ inline bool isValidCommand(uint8_t cmd) {
   return (cmd == static_cast<uint8_t>(CommandCode::START) ||
           cmd == static_cast<uint8_t>(CommandCode::STOP) ||
           cmd == static_cast<uint8_t>(CommandCode::RECALIBRATE) ||
-          cmd == static_cast<uint8_t>(CommandCode::DOWNLOAD));
+          cmd == static_cast<uint8_t>(CommandCode::DOWNLOAD) ||
+          cmd == static_cast<uint8_t>(CommandCode::TRUNCATE));
 }
 
 /**
  * ESP-NOW configuration constants
  */
-#define ESPNOW_CHANNEL 1     // WiFi channel for ESP-NOW communication
+// #define ESPNOW_CHANNEL 3     // WiFi channel for ESP-NOW communication
 #define ESPNOW_MAX_RETRIES 0 // No retries (fire-and-forget for speed)
 
 #endif // ESPNOW_PROTOCOL_H

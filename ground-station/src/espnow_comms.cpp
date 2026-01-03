@@ -65,7 +65,19 @@ bool initESPNow(const uint8_t *rocketMAC, TelemetryCallback telCallback,
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
 
+  // Set link protocol to 802.11LR
+  WiFi.enableLongRange(true);
+  /*
+  esp_err_t protoResult = esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_LR);
+  if (protoResult != ESP_OK) {
+    Serial.printf("LOG: ERROR - Failed to set WiFi protocol to LR (error %d)\n",
+  protoResult); return false;
+  }
+  */
+
   // Set WiFi channel
+  WiFi.setChannel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
+  /*
   esp_err_t channelResult =
       esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
   if (channelResult != ESP_OK) {
@@ -73,6 +85,7 @@ bool initESPNow(const uint8_t *rocketMAC, TelemetryCallback telCallback,
                   ESPNOW_CHANNEL, channelResult);
     return false;
   }
+  */
 
   Serial.printf("LOG: WiFi initialized in STA mode, channel %d\n",
                 ESPNOW_CHANNEL);
@@ -132,6 +145,9 @@ bool sendCommand(CommandCode cmd) {
       break;
     case CommandCode::DOWNLOAD:
       cmdName = "DOWNLOAD";
+      break;
+    case CommandCode::TRUNCATE:
+      cmdName = "TRUNCATE";
       break;
     }
     Serial.printf("LOG: Command sent: %s\n", cmdName);

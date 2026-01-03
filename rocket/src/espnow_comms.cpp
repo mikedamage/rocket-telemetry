@@ -67,17 +67,29 @@ bool initESPNow(const uint8_t *groundStationMAC, CommandCallback callback) {
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
 
-  // Set WiFi channel
-  esp_err_t channelResult =
-      esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
-  if (channelResult != ESP_OK) {
-    Serial.printf("ERROR: Failed to set WiFi channel %d (error: %d)\n",
-                  ESPNOW_CHANNEL, channelResult);
-    return false;
+  // Set link protocol to 802.11LR
+  WiFi.enableLongRange(true);
+  /*
+  esp_err_t protoResult = esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_LR);
+  if (protoResult != ESP_OK) {
+    Serial.printf("LOG: ERROR - Failed to set WiFi protocol to LR (error %d)\n",
+  protoResult); return false;
   }
+  */
+
+  // Set WiFi channel
+  WiFi.setChannel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
+  // esp_err_t channelResult =
+  //     esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
+  // if (channelResult != ESP_OK) {
+  //   Serial.printf("ERROR: Failed to set WiFi channel %d (error: %d)\n",
+  //                 ESPNOW_CHANNEL, channelResult);
+  //   return false;
+  // }
 
   Serial.printf("WiFi initialized in STA mode, channel %d\n", ESPNOW_CHANNEL);
   Serial.printf("Rocket MAC: %s\n", WiFi.macAddress().c_str());
+  WiFi.printDiag(Serial);
 
   // Initialize ESP-NOW
   if (esp_now_init() != ESP_OK) {

@@ -33,6 +33,7 @@ class CommandProcessor:
             'recalibrate': 'RECALIBRATE',
             'stats': 'STATS',
             'download': 'DOWNLOAD',
+            'truncate': 'TRUNCATE',
         }
 
     def get_command_list(self):
@@ -64,6 +65,7 @@ class CommandProcessor:
             "  stop         - Stop telemetry transmission",
             "  recalibrate  - Recalibrate altimeter baseline",
             "  download     - Download flight log from rocket",
+            "  truncate     - Delete and recreate rocket flight log",
             "  stats        - Show ground station statistics",
             "",
             "Special commands:",
@@ -75,6 +77,7 @@ class CommandProcessor:
             "  stop",
             "  recalibrate",
             "  download",
+            "  truncate",
             "  stats",
         ]
         return "\n".join(help_text)

@@ -55,6 +55,7 @@ bool timeoutElapsed = false;
 bool forceActivateBeacon = false;
 bool forceRecalibrateAltimeter = false;
 bool downloadRequested = false;
+bool truncateRequested = false;
 
 // Timing
 unsigned long lastReading = 0;
@@ -71,6 +72,7 @@ bool createCsvLog();
 size_t littlefsFreeSpace();
 bool canWriteFlightLog();
 void handleFileDownload();
+void handleTruncateLog();
 
 /**
  * ESP-NOW command callback
@@ -97,6 +99,11 @@ void onCommandReceived(CommandCode cmd) {
   case CommandCode::DOWNLOAD:
     downloadRequested = true;
     Serial.println(F("DOWNLOAD command received - will send flight log"));
+    break;
+
+  case CommandCode::TRUNCATE:
+    truncateRequested = true;
+    Serial.println(F("TRUNCATE command received - will clear flight log"));
     break;
   }
 }
@@ -182,6 +189,11 @@ void loop() {
     downloadRequested = false;
   }
 
+  if (truncateRequested) {
+    handleTruncateLog();
+    truncateRequested = false;
+  }
+
   if (!timeoutElapsed && transmissionEnabled) {
     // Normal flight operations
 
@@ -252,23 +264,22 @@ void takeSensorReading() {
     return;
 
   // Read sensor data
-  float temp = bme.readTemperature() * 100.0F;
-  float pressure = bme.readPressure() / 100.0F; // hPa
-  float altitude = bme.readAltitude(groundReferencePressure) *
-                   100.0F; // relative to configured ground reference
-  float humidity = bme.readHumidity() * 100.0F;
+  float temp = bme.readTemperature();
+  float pressure = bme.readPressure() / 100.0F; // Convert Pa to hPa
+  float altitude = bme.readAltitude(groundReferencePressure); // meters
+  float humidity = bme.readHumidity();
 
   lastReading = currentTime;
 
   // Create SensorReading struct
   SensorReading reading;
   reading.timestamp = lastReading;
-  reading.temperature = (int16_t)temp;
-  reading.pressure = (uint16_t)pressure;
+  reading.temperature = temp;
+  reading.pressure = pressure;
   // Clamp altitude to 0 for negative values (pressure fluctuations at ground
   // level)
-  reading.altitude = (uint16_t)(altitude < 0 ? 0 : altitude);
-  reading.humidity = (uint16_t)humidity;
+  reading.altitude = (altitude < 0 ? 0 : altitude);
+  reading.humidity = humidity;
 
   // Send via ESP-NOW immediately
   if (!sendTelemetry(reading)) {
@@ -284,9 +295,9 @@ void takeSensorReading() {
     File csvFile = LittleFS.open(csvFileName, "a");
     if (csvFile) {
       char csvLine[100];
-      snprintf(csvLine, sizeof(csvLine), "%lu,%d,%u,%u,%u\n", reading.timestamp,
-               reading.temperature, reading.pressure, reading.altitude,
-               reading.humidity);
+      snprintf(csvLine, sizeof(csvLine), "%lu,%.2f,%.2f,%.4f,%.2f\n",
+               reading.timestamp, reading.temperature, reading.pressure,
+               reading.altitude, reading.humidity);
       csvFile.print(csvLine);
       csvFile.close();
     }
@@ -296,11 +307,10 @@ void takeSensorReading() {
   static uint32_t readingCount = 0;
   readingCount++;
   if (readingCount % 25 == 0) {
-    Serial.printf(F("Reading #%lu: T=%.2f°C, P=%.0fhPa, A=%.2fm, RH=%.2f%% "
+    Serial.printf(F("Reading #%lu: T=%.2f°C, P=%.2fhPa, A=%.4fm, RH=%.2f%% "
                     "(sent: %lu, failed: %lu)\n"),
-                  readingCount, temp / 100.0, pressure, altitude / 100.0,
-                  humidity / 100.0, getTelemetrySentCount(),
-                  getTelemetryFailCount());
+                  readingCount, temp, pressure, altitude, humidity,
+                  getTelemetrySentCount(), getTelemetryFailCount());
   }
 }
 
@@ -420,4 +430,35 @@ void handleFileDownload() {
   csvFile.close();
   Serial.printf("Download complete: %d chunks, %d bytes sent\n", sequenceNumber,
                 totalBytesSent);
+}
+
+void handleTruncateLog() {
+  if (!fileSystemReady) {
+    Serial.println(F("Cannot truncate: file system not ready"));
+    return;
+  }
+
+  // Delete the existing file
+  if (LittleFS.exists(csvFileName)) {
+    LittleFS.remove(csvFileName);
+    Serial.println(F("Flight log deleted"));
+  }
+
+  // Recreate the file with header
+  if (createCsvLog()) {
+    Serial.println(F("Flight log recreated with CSV header"));
+  } else {
+    Serial.println(F("Failed to recreate flight log"));
+    return;
+  }
+
+  // Re-enable CSV logging in case it was disabled
+  csvLoggingEnabled = true;
+
+  // Report storage status
+  size_t totalBytes = LittleFS.totalBytes();
+  size_t usedBytes = LittleFS.usedBytes();
+  size_t freeBytes = littlefsFreeSpace();
+  Serial.printf("Storage after truncate: %d/%d bytes used, %d bytes free\n",
+                usedBytes, totalBytes, freeBytes);
 }

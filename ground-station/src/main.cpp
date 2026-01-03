@@ -47,15 +47,11 @@ void logDebug(const char *format, ...) {
  * DATA: timestamp,temperature,pressure,altitude,humidity,rssi
  */
 void onTelemetryReceived(const SensorReading &reading, int8_t rssi) {
-  // Convert fixed-point integers back to floating point for CSV output
-  float temp = reading.temperature / 100.0f;
-  float pressure = reading.pressure / 1.0f; // Already in hPa
-  float altitude = reading.altitude / 100.0f;
-  float humidity = reading.humidity / 100.0f;
-
+  // Values are already floats - output directly with appropriate precision
   // Output CSV format with RSSI as final column
-  Serial.printf("DATA: %lu,%.2f,%.2f,%.2f,%.2f,%d\n", reading.timestamp, temp,
-                pressure, altitude, humidity, rssi);
+  Serial.printf("DATA: %lu,%.2f,%.2f,%.4f,%.2f,%d\n", reading.timestamp,
+                reading.temperature, reading.pressure, reading.altitude,
+                reading.humidity, rssi);
 }
 
 /**
@@ -81,6 +77,7 @@ void onFileChunkReceived(const FileChunk &chunk) {
  * - STOP
  * - RECALIBRATE
  * - DOWNLOAD
+ * - TRUNCATE
  * - STATS (local command - show statistics)
  */
 void processSerialCommand(const char *command) {
@@ -97,6 +94,8 @@ void processSerialCommand(const char *command) {
     sendCommand(CommandCode::RECALIBRATE);
   } else if (cmd == "DOWNLOAD") {
     sendCommand(CommandCode::DOWNLOAD);
+  } else if (cmd == "TRUNCATE") {
+    sendCommand(CommandCode::TRUNCATE);
   } else if (cmd == "STATS") {
     // Local command - show statistics
     logDebug("Telemetry packets received: %lu", getTelemetryReceivedCount());
@@ -111,7 +110,8 @@ void processSerialCommand(const char *command) {
     }
   } else if (cmd.length() > 0) {
     logDebug("Unknown command: %s", command);
-    logDebug("Valid commands: START, STOP, RECALIBRATE, DOWNLOAD, STATS");
+    logDebug(
+        "Valid commands: START, STOP, RECALIBRATE, DOWNLOAD, TRUNCATE, STATS");
   }
 }
 
@@ -153,7 +153,8 @@ void setup() {
 
   logDebug("Ground station ready");
   logDebug("Waiting for telemetry from rocket...");
-  logDebug("Available commands: START, STOP, RECALIBRATE, DOWNLOAD, STATS");
+  logDebug("Available commands: START, STOP, RECALIBRATE, DOWNLOAD, TRUNCATE, "
+           "STATS");
 }
 
 void loop() {
