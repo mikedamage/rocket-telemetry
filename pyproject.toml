@@ -1,0 +1,10 @@
+[project]
+name = "rocket-telemetry"
+version = "0.1.0"
+description = "Utilities and firmware for model rocket radio telemetry"
+requires-python = ">=3.13"
+dependencies = [
+  "pyserial >= 3.5",
+  "platformio >= 6.1.18",
+]
+
