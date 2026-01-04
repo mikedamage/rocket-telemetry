@@ -35,6 +35,12 @@ The rocket is an Estes Cosmic Cargo rocket kit. It weighs 36 grams without paylo
 
 # Workflow
 
+## Python Environment
+
+Use `uv` to manage the Python virtual environment and all external library dependencies. Preface all invocations of python based CLI executables with `uv run`.
+
+When I start a new Claude session, before you attempt to run `python3` or `pio` commands, check for the presence of a `.venv` directory at project root. If none exists, run `uv sync` and ensure it succeeded before proceeding. 
+
 ## USB serial devices
 
 Boards appear as the following device paths when plugged in via USB:
