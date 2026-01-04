@@ -23,3 +23,6 @@ export GROUND_STATION_MAC="0x00,0x00,0x00,0x00,0x00,0x02"
 
 # Optional: Ground reference pressure in hPa (default: 1013.25)
 # export GROUND_REFERENCE_PRESSURE=1013.25
+
+# Optional: ESP-NOW channel selection (default: 1)
+# export ESPNOW_CHANNEL=3
