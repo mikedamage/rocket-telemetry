@@ -1,7 +1,7 @@
 # ESP-NOW Configuration for Rocket Telemetry System
 #
 # Copy this file to .envrc and fill in the MAC addresses of your devices.
-# Get MAC addresses by:
+# How to get the real MAC addresses for your boards:
 #   1. Flash each device with placeholder MACs (0x00,0x00,0x00,0x00,0x00,0x01 and 0x02)
 #   2. Check serial output for "Rocket MAC:" or "Ground station MAC:"
 #   3. Fill in the real MACs below
@@ -23,6 +23,9 @@ export GROUND_STATION_MAC="0x00,0x00,0x00,0x00,0x00,0x02"
 
 # Optional: Ground reference pressure in hPa (default: 1013.25)
 # export GROUND_REFERENCE_PRESSURE=1013.25
+
+# Optional: BLE Beacon UUID
+# export BEACON_UUID="YOUR_UUID_VALUE_HERE"
 
 # Optional: ESP-NOW channel selection (default: 1)
 # export ESPNOW_CHANNEL=3
