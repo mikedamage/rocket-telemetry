@@ -3,13 +3,14 @@
  */
 
 #include "espnow_comms.h"
+#include <atomic>
 
 // Static variables for callbacks and statistics
 static CommandCallback commandCallback = nullptr;
 static uint8_t groundStationAddress[6];
-static volatile uint32_t telemetrySentCount = 0;
-static volatile uint32_t telemetryFailCount = 0;
-static volatile uint32_t commandsReceivedCount = 0;
+static std::atomic<uint32_t> telemetrySentCount{0};
+static std::atomic<uint32_t> telemetryFailCount{0};
+static std::atomic<uint32_t> commandsReceivedCount{0};
 
 /**
  * ESP-NOW receive callback
@@ -25,9 +26,7 @@ static void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *data,
     if (isValidCommand(cmdByte)) {
       CommandCode cmd = static_cast<CommandCode>(cmdByte);
 
-      // Use atomic increment instead of deprecated volatile++
-      uint32_t count = commandsReceivedCount;
-      commandsReceivedCount = count + 1;
+      commandsReceivedCount.fetch_add(1, std::memory_order_relaxed);
 
       commandCallback(cmd);
     } else {
@@ -43,13 +42,12 @@ static void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *data,
 static void onDataSent(const wifi_tx_info_t *info,
                        esp_now_send_status_t status) {
   if (status != ESP_NOW_SEND_SUCCESS) {
-    // Use atomic increment instead of deprecated volatile++
-    uint32_t count = telemetryFailCount;
-    telemetryFailCount = count + 1;
+    uint32_t failCount =
+        telemetryFailCount.fetch_add(1, std::memory_order_relaxed) + 1;
 
     // Only log failures periodically to avoid flooding serial
-    if (telemetryFailCount % 10 == 1) {
-      Serial.printf("ESP-NOW send failures: %lu\n", telemetryFailCount);
+    if (failCount % 10 == 1) {
+      Serial.printf("ESP-NOW send failures: %lu\n", failCount);
     }
   }
 }
@@ -69,13 +67,6 @@ bool initESPNow(const uint8_t *groundStationMAC, CommandCallback callback) {
 
   // Set link protocol to 802.11LR
   WiFi.enableLongRange(true);
-  /*
-  esp_err_t protoResult = esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_LR);
-  if (protoResult != ESP_OK) {
-    Serial.printf("LOG: ERROR - Failed to set WiFi protocol to LR (error %d)\n",
-  protoResult); return false;
-  }
-  */
 
   // Set WiFi channel
   WiFi.setChannel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
@@ -127,9 +118,7 @@ bool sendTelemetry(const SensorReading &reading) {
       groundStationAddress, (const uint8_t *)&reading, sizeof(SensorReading));
 
   if (result == ESP_OK) {
-    // Use atomic increment instead of deprecated volatile++
-    uint32_t count = telemetrySentCount;
-    telemetrySentCount = count + 1;
+    telemetrySentCount.fetch_add(1, std::memory_order_relaxed);
     return true;
   } else {
     // Don't increment telemetryFailCount here - it's counted in onDataSent
@@ -152,8 +141,14 @@ bool sendFileChunk(const FileChunk &chunk) {
   }
 }
 
-uint32_t getTelemetrySentCount() { return telemetrySentCount; }
+uint32_t getTelemetrySentCount() {
+  return telemetrySentCount.load(std::memory_order_relaxed);
+}
 
-uint32_t getTelemetryFailCount() { return telemetryFailCount; }
+uint32_t getTelemetryFailCount() {
+  return telemetryFailCount.load(std::memory_order_relaxed);
+}
 
-uint32_t getCommandsReceivedCount() { return commandsReceivedCount; }
+uint32_t getCommandsReceivedCount() {
+  return commandsReceivedCount.load(std::memory_order_relaxed);
+}

@@ -50,5 +50,6 @@ bool sendCommand(CommandCode cmd);
  */
 uint32_t getTelemetryReceivedCount();
 uint32_t getCommandsSentCount();
+uint32_t getCommandsSendFailCount();
 
 #endif // ESPNOW_COMMS_H

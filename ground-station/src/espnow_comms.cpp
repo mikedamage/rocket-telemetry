@@ -3,13 +3,15 @@
  */
 
 #include "espnow_comms.h"
+#include <atomic>
 
 // Static variables for callbacks and statistics
 static TelemetryCallback telemetryCallback = nullptr;
 static FileChunkCallback fileChunkCallback = nullptr;
 static uint8_t rocketAddress[6];
-static volatile uint32_t telemetryReceivedCount = 0;
-static volatile uint32_t commandsSentCount = 0;
+static std::atomic<uint32_t> telemetryReceivedCount{0};
+static std::atomic<uint32_t> commandsSentCount{0};
+static std::atomic<uint32_t> commandsSendFailCount{0};
 
 /**
  * ESP-NOW receive callback
@@ -24,9 +26,7 @@ static void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *data,
         reinterpret_cast<const SensorReading *>(data);
     int8_t rssi = info->rx_ctrl->rssi;
 
-    // Use atomic increment instead of deprecated volatile++
-    uint32_t count = telemetryReceivedCount;
-    telemetryReceivedCount = count + 1;
+    telemetryReceivedCount.fetch_add(1, std::memory_order_relaxed);
 
     telemetryCallback(*reading, rssi);
   } else if (len == sizeof(FileChunk) && fileChunkCallback != nullptr) {
@@ -46,8 +46,9 @@ static void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *data,
  */
 static void onDataSent(const wifi_tx_info_t *info,
                        esp_now_send_status_t status) {
-  // Silent operation - don't log every send
-  // Could add error counter here if needed
+  if (status != ESP_NOW_SEND_SUCCESS) {
+    commandsSendFailCount.fetch_add(1, std::memory_order_relaxed);
+  }
 }
 
 bool initESPNow(const uint8_t *rocketMAC, TelemetryCallback telCallback,
@@ -67,13 +68,6 @@ bool initESPNow(const uint8_t *rocketMAC, TelemetryCallback telCallback,
 
   // Set link protocol to 802.11LR
   WiFi.enableLongRange(true);
-  /*
-  esp_err_t protoResult = esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_LR);
-  if (protoResult != ESP_OK) {
-    Serial.printf("LOG: ERROR - Failed to set WiFi protocol to LR (error %d)\n",
-  protoResult); return false;
-  }
-  */
 
   // Set WiFi channel
   WiFi.setChannel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
@@ -127,9 +121,7 @@ bool sendCommand(CommandCode cmd) {
   esp_err_t result = esp_now_send(rocketAddress, &cmdByte, sizeof(cmdByte));
 
   if (result == ESP_OK) {
-    // Use atomic increment instead of deprecated volatile++
-    uint32_t count = commandsSentCount;
-    commandsSentCount = count + 1;
+    commandsSentCount.fetch_add(1, std::memory_order_relaxed);
 
     // Log command sent
     const char *cmdName = "UNKNOWN";
@@ -159,6 +151,14 @@ bool sendCommand(CommandCode cmd) {
   }
 }
 
-uint32_t getTelemetryReceivedCount() { return telemetryReceivedCount; }
+uint32_t getTelemetryReceivedCount() {
+  return telemetryReceivedCount.load(std::memory_order_relaxed);
+}
 
-uint32_t getCommandsSentCount() { return commandsSentCount; }
+uint32_t getCommandsSentCount() {
+  return commandsSentCount.load(std::memory_order_relaxed);
+}
+
+uint32_t getCommandsSendFailCount() {
+  return commandsSendFailCount.load(std::memory_order_relaxed);
+}

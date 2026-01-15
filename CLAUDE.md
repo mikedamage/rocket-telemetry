@@ -39,7 +39,7 @@ The rocket is an Estes Cosmic Cargo rocket kit. It weighs 36 grams without paylo
 
 Use `uv` to manage the Python virtual environment and all external library dependencies. Preface all invocations of python based CLI executables with `uv run`.
 
-When I start a new Claude session, before you attempt to run `python3` or `pio` commands, check for the presence of a `.venv` directory at project root. If none exists, run `uv sync` and ensure it succeeded before proceeding. 
+When I start a new Claude session, before you attempt to run `python3` or `pio` commands, check for the presence of a `.venv` directory at project root. If none exists, run `uv sync` and ensure it succeeded before proceeding.
 
 ## USB serial devices
 
@@ -53,3 +53,9 @@ Boards appear as the following device paths when plugged in via USB:
 - Compile the rocket code: `cd rocket && uv run pio run`
 - Compile ground station code: `cd ground-station && uv run pio run`
 - Boards are flashed using `cd [BOARD_FIRMWARE] && uv run pio run -t upload --upload-port=[BOARD_USB_SERIAL_DEVICE]` to disambiguate which board you're flashing. Refer to the devices listed in the previous section for `BOARD_USB_SERIAL_DEVICE` values
+
+## Git Guidelines
+
+- Commit and push only when instructed to.
+- When naming branches, prefix bugfix branches with `fix/`, features with `feat/`, and minor updates that have no significant impact on functionality or performance with `chore/`
+- Commit messages should begin with a short, one-sentence summary on the first line, then a blank line, and then a bulleted list consisting of brief summaries of each todo item completed or change made

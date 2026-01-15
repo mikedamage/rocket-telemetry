@@ -19,10 +19,18 @@
 // Parse rocket MAC address from build flags
 const uint8_t rocketMacAddress[6] = {ROCKET_MAC};
 
-// Serial command buffer
-const size_t SERIAL_BUFFER_SIZE = 256;
-char serialBuffer[SERIAL_BUFFER_SIZE];
-size_t serialBufferIndex = 0;
+/**
+ * Runtime state for the ground station
+ * Groups all mutable state in one place for clarity
+ */
+struct GroundStationState {
+  static const size_t SERIAL_BUFFER_SIZE = 256;
+  char serialBuffer[SERIAL_BUFFER_SIZE] = {0};
+  size_t serialBufferIndex = 0;
+  bool discardingOverflow = false; // True when consuming overflow input
+};
+
+static GroundStationState state;
 
 /**
  * Log a debug message to Serial with "LOG: " prefix
@@ -122,17 +130,30 @@ void processSerialInput() {
   while (Serial.available()) {
     char c = Serial.read();
 
-    if (c == '\n' || c == '\r') {
-      if (serialBufferIndex > 0) {
-        serialBuffer[serialBufferIndex] = '\0';
-        processSerialCommand(serialBuffer);
-        serialBufferIndex = 0;
+    // If we're discarding overflow, consume until newline
+    if (state.discardingOverflow) {
+      if (c == '\n' || c == '\r') {
+        state.discardingOverflow = false;
       }
-    } else if (serialBufferIndex < SERIAL_BUFFER_SIZE - 1) {
-      serialBuffer[serialBufferIndex++] = c;
+      // Discard this character
+      continue;
+    }
+
+    if (c == '\n' || c == '\r') {
+      if (state.serialBufferIndex > 0) {
+        state.serialBuffer[state.serialBufferIndex] = '\0';
+        processSerialCommand(state.serialBuffer);
+        state.serialBufferIndex = 0;
+      }
+    } else if (state.serialBufferIndex <
+               GroundStationState::SERIAL_BUFFER_SIZE - 1) {
+      state.serialBuffer[state.serialBufferIndex++] = c;
     } else {
-      logDebug("ERROR: Command too long");
-      serialBufferIndex = 0;
+      // Buffer overflow - discard this character and all subsequent until
+      // newline
+      logDebug("ERROR: Command too long, discarding input until newline");
+      state.serialBufferIndex = 0;
+      state.discardingOverflow = true;
     }
   }
 }
@@ -144,10 +165,12 @@ void setup() {
   logDebug("Ground Station WiFi LR (ESP-NOW) starting...");
 
   // Initialize ESP-NOW and register rocket
+  // Error handling strategy: Critical errors (ESP-NOW init) halt the system
+  // for safety. Non-critical errors (serial parsing) are logged and ignored.
   if (!initESPNow(rocketMacAddress, onTelemetryReceived, onFileChunkReceived)) {
     logDebug("FATAL: ESP-NOW initialization failed");
     while (1) {
-      delay(1000);
+      delay(1000); // Halt - requires physical reset
     }
   }
 
@@ -164,5 +187,7 @@ void loop() {
   // ESP-NOW telemetry reception is handled via callback (onTelemetryReceived)
   // No polling needed
 
-  delay(1); // Small delay to prevent watchdog issues
+  // No explicit delay needed - serial processing is fast and ESP-NOW uses
+  // callbacks. If watchdog resets occur, add delay(1) or increase watchdog
+  // timeout.
 }
