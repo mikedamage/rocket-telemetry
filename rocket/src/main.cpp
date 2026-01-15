@@ -122,6 +122,7 @@ void onCommandReceived(CommandCode cmd) {
   case CommandCode::START:
     state.transmissionEnabled = true;
     state.telemetryStartTime = millis();
+    state.timeoutElapsed = false; // Reset timeout flag for subsequent starts
     Serial.println(F("START command received - telemetry enabled"));
     break;
 
