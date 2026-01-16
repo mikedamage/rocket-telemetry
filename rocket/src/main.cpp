@@ -251,9 +251,13 @@ void loop() {
     activateBLEBeacon();
   }
 
-  // No explicit delay needed - loop operations complete quickly enough.
-  // If watchdog resets occur during heavy operation periods, add delay(1)
-  // or increase watchdog timeout via sdkconfig.
+  // Yield to FreeRTOS scheduler to allow WiFi task (ESP-NOW) to run.
+  // When idle: longer delay saves power and ensures reliable command reception.
+  // During transmission: I2C sensor reads provide natural yielding, so no
+  // additional delay needed to maintain timing accuracy.
+  if (!state.transmissionEnabled) {
+    delay(10);
+  }
 }
 
 size_t littlefsFreeSpace() {
