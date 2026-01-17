@@ -6,5 +6,7 @@ requires-python = ">=3.13"
 dependencies = [
   "pyserial >= 3.5",
   "platformio >= 6.1.18",
+  "matplotlib>=3.10.8",
+  "pandas>=2.3.3",
 ]
 

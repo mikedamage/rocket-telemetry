@@ -4,6 +4,11 @@
  * Collects sensor data from BME280 and transmits via ESP-NOW to ground station.
  * Logs data locally to LittleFS as backup.
  * Activates BLE beacon after timeout for rocket recovery.
+ *
+ * Threading model:
+ * - Core 1: Main loop (sensor reads, ESP-NOW transmission, command handling)
+ * - Core 0: CSV logging task (flash writes isolated from time-critical
+ * operations)
  */
 
 #include "../../shared/espnow_protocol.h"
@@ -16,6 +21,16 @@
 #include <NimBLEDevice.h>
 #include <TinyPICO.h>
 #include <Wire.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
+#include <freertos/semphr.h>
+#include <freertos/task.h>
+
+// Compile-time debug serial output control
+// Set to 0 to disable debug serial output during flight for maximum performance
+#ifndef DEBUG_SERIAL
+#define DEBUG_SERIAL 1
+#endif
 
 // Ensure MAC address is defined at build time
 #ifndef GROUND_STATION_MAC
@@ -57,7 +72,9 @@ NimBLEAdvertising *beaconAdvertising = nullptr;
  */
 struct RocketState {
   // Configuration (may be modified at runtime)
-  const char *csvFileName = "/telemetry.csv"; // Single file design - use TRUNCATE command before each flight
+  const char *csvFileName =
+      "/telemetry.csv"; // Single file design - use TRUNCATE command before each
+                        // flight
   unsigned long readingInterval = READING_INTERVAL;
   uint32_t telemetryTimeout = TELEMETRY_TIMEOUT;
   float groundReferencePressure = GROUND_REFERENCE_PRESSURE;
@@ -87,9 +104,6 @@ struct RocketState {
   unsigned long lastReading = 0;
   unsigned long currentTime = 0;
   unsigned long telemetryStartTime = 0;
-
-  // Storage management
-  uint32_t csvWriteCount = 0; // Number of CSV writes since last storage check
 };
 
 static RocketState state;
@@ -101,6 +115,93 @@ static const size_t FLASH_SAFETY_MARGIN =
 static const uint32_t STORAGE_CHECK_INTERVAL =
     100; // Check storage every N writes
 
+// CSV logging queue configuration
+static const size_t CSV_LOG_QUEUE_SIZE = 200; // Buffer ~4 seconds at 50Hz
+static const size_t CSV_WRITE_BATCH_SIZE =
+    20; // Write this many readings per file open/close
+static const size_t CSV_LINE_SIZE = 64; // Max size of one CSV line
+
+// FreeRTOS handles for CSV logging task
+static QueueHandle_t csvLogQueue = nullptr;
+static TaskHandle_t csvLogTaskHandle = nullptr;
+static SemaphoreHandle_t filesystemMutex = nullptr;
+
+/**
+ * CSV logging task - runs on Core 0
+ * Dequeues sensor readings and writes to flash in batches, isolated from
+ * time-critical operations on Core 1. Batching reduces file open/close
+ * overhead which is the main bottleneck with LittleFS.
+ */
+static void csvLoggerTask(void *param) {
+  SensorReading readings[CSV_WRITE_BATCH_SIZE];
+  char csvBuffer[CSV_WRITE_BATCH_SIZE * CSV_LINE_SIZE];
+  uint32_t writeCount = 0;
+  size_t batchIndex = 0;
+
+  while (true) {
+    // Wait for a reading with timeout to ensure periodic flush
+    SensorReading reading;
+    BaseType_t received =
+        xQueueReceive(csvLogQueue, &reading, pdMS_TO_TICKS(100));
+
+    if (received == pdTRUE) {
+      // Check if logging is still enabled
+      if (!state.csvLoggingEnabled || !state.fileSystemReady) {
+        batchIndex = 0; // Clear batch if logging disabled
+        continue;
+      }
+
+      // Add to batch
+      readings[batchIndex++] = reading;
+    }
+
+    // Write batch when full OR on timeout with pending data
+    bool shouldWrite = (batchIndex >= CSV_WRITE_BATCH_SIZE) ||
+                       (received != pdTRUE && batchIndex > 0);
+
+    if (shouldWrite && state.csvLoggingEnabled && state.fileSystemReady) {
+      // Check storage space periodically
+      writeCount += batchIndex;
+      if (writeCount >= STORAGE_CHECK_INTERVAL) {
+        writeCount = 0;
+        size_t freeBytes = LittleFS.totalBytes() - LittleFS.usedBytes();
+        if (freeBytes < (CSV_BYTES_PER_READING * CSV_WRITE_BATCH_SIZE) +
+                            FLASH_SAFETY_MARGIN) {
+          Serial.println(F("Flash storage full - stopping CSV logging"));
+          state.csvLoggingEnabled = false;
+          batchIndex = 0;
+          continue;
+        }
+      }
+
+      // Build batch buffer
+      size_t bufferPos = 0;
+      for (size_t i = 0; i < batchIndex; i++) {
+        int written =
+            snprintf(csvBuffer + bufferPos, sizeof(csvBuffer) - bufferPos,
+                     "%lu,%.2f,%.2f,%.4f,%.2f\n", readings[i].timestamp,
+                     readings[i].temperature, readings[i].pressure,
+                     readings[i].altitude, readings[i].humidity);
+        if (written > 0) {
+          bufferPos += written;
+        }
+      }
+
+      // Write entire batch in one file operation
+      if (xSemaphoreTake(filesystemMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        File csvFile = LittleFS.open(state.csvFileName, "a");
+        if (csvFile) {
+          csvFile.write((const uint8_t *)csvBuffer, bufferPos);
+          csvFile.close();
+        }
+        xSemaphoreGive(filesystemMutex);
+      }
+
+      batchIndex = 0;
+    }
+  }
+}
+
 // Forward declarations
 void calibrateAltimeter();
 void takeSensorReading();
@@ -109,7 +210,6 @@ void initializeBLE();
 void activateBLEBeacon();
 bool createCsvLog();
 size_t littlefsFreeSpace();
-bool canWriteFlightLog();
 void handleFileDownload();
 void handleTruncateLog();
 
@@ -153,6 +253,17 @@ void setup() {
   delay(100); // Brief delay for serial to initialize, but don't block
 
   Serial.println(F("TinyPICO Rocket Telemetry System (ESP-NOW) Starting..."));
+
+  // Create FreeRTOS primitives for CSV logging
+  csvLogQueue = xQueueCreate(CSV_LOG_QUEUE_SIZE, sizeof(SensorReading));
+  filesystemMutex = xSemaphoreCreateMutex();
+
+  if (csvLogQueue == nullptr || filesystemMutex == nullptr) {
+    Serial.println(F("ERROR: Failed to create FreeRTOS primitives"));
+    while (1) {
+      delay(1000);
+    }
+  }
 
   // Initialize LittleFS
   if (LittleFS.begin(true)) {
@@ -214,6 +325,19 @@ void setup() {
 
   // Initialize BLE (but don't start beacon yet)
   initializeBLE();
+
+  // Start CSV logging task on Core 0 (background, lower priority)
+  BaseType_t taskResult =
+      xTaskCreatePinnedToCore(csvLoggerTask, "CSVLogger", 8192, nullptr, 1,
+                              &csvLogTaskHandle, 0 // Core 0
+      );
+
+  if (taskResult != pdPASS) {
+    Serial.println(F("ERROR: Failed to create CSV logger task"));
+    // Continue anyway - CSV logging will be disabled but telemetry will work
+  } else {
+    Serial.println(F("CSV logger task started on Core 0"));
+  }
 
   Serial.println(F("System ready"));
   Serial.println(F("Waiting for START command from ground station..."));
@@ -329,40 +453,45 @@ void takeSensorReading() {
   // Clamp altitude to 0 for negative values (pressure fluctuations at ground
   // level)
   if (altitude < 0) {
+#if DEBUG_SERIAL
     // Log clamping to help detect sensor calibration issues
     static uint32_t clampCount = 0;
     if (++clampCount % 50 == 1) { // Log every 50 clamps to avoid spam
       Serial.printf("Altitude clamped to 0 (was %.2fm) - check calibration\n",
                     altitude);
     }
+#endif
     reading.altitude = 0;
   } else {
     reading.altitude = altitude;
   }
   reading.humidity = humidity;
 
-  // Send via ESP-NOW immediately
+  // Send via ESP-NOW immediately (time-critical)
   if (!sendTelemetry(reading)) {
+#if DEBUG_SERIAL
     // Log failures periodically
     if (getTelemetryFailCount() % 10 == 1) {
       Serial.printf("ESP-NOW send failed (total failures: %lu)\n",
                     getTelemetryFailCount());
     }
+#endif
   }
 
-  // Log to local CSV (independent of transmission)
-  if (canWriteFlightLog()) {
-    File csvFile = LittleFS.open(state.csvFileName, "a");
-    if (csvFile) {
-      char csvLine[100];
-      snprintf(csvLine, sizeof(csvLine), "%lu,%.2f,%.2f,%.4f,%.2f\n",
-               reading.timestamp, reading.temperature, reading.pressure,
-               reading.altitude, reading.humidity);
-      csvFile.print(csvLine);
-      csvFile.close();
+  // Enqueue for CSV logging on Core 0 (non-blocking)
+  if (state.csvLoggingEnabled && csvLogQueue != nullptr) {
+    // Don't block if queue is full - telemetry transmission takes priority
+    if (xQueueSend(csvLogQueue, &reading, 0) != pdTRUE) {
+#if DEBUG_SERIAL
+      static uint32_t queueFullCount = 0;
+      if (++queueFullCount % 100 == 1) {
+        Serial.println(F("CSV log queue full - some readings may be lost"));
+      }
+#endif
     }
   }
 
+#if DEBUG_SERIAL
   // Debug output at configured interval
   static uint32_t readingCount = 0;
   readingCount++;
@@ -372,6 +501,7 @@ void takeSensorReading() {
                   readingCount, temp, pressure, altitude, humidity,
                   getTelemetrySentCount(), getTelemetryFailCount());
   }
+#endif
 }
 
 void checkTelemetryTimeout() {
@@ -413,48 +543,32 @@ void activateBLEBeacon() {
   Serial.println(F("BLE beacon active - rocket can now be located!"));
 }
 
-bool canWriteFlightLog() {
-  if (!state.fileSystemReady || !state.csvLoggingEnabled) {
-    return false;
-  }
-
-  // Check storage space every N writes instead of every time
-  state.csvWriteCount++;
-  if (state.csvWriteCount >= STORAGE_CHECK_INTERVAL) {
-    state.csvWriteCount = 0; // Reset counter
-
-    size_t totalBytes = LittleFS.totalBytes();
-    size_t usedBytes = LittleFS.usedBytes();
-    size_t freeBytes = totalBytes - usedBytes;
-
-    if (freeBytes < CSV_BYTES_PER_READING + FLASH_SAFETY_MARGIN) {
-      Serial.println(F("Flash storage full - stopping CSV logging"));
-      Serial.printf("STORAGE_FULL: %d/%d bytes used\n", usedBytes, totalBytes);
-      state.csvLoggingEnabled = false;
-      return false;
-    }
-  }
-
-  return true;
-}
-
 void handleFileDownload() {
   // File download protocol: Sends chunks with 5ms delay, no ACKs/retries.
   // This is acceptable for post-flight data recovery where reliability is less
-  // critical than simplicity. Chunks may be lost if ground station buffer fills.
+  // critical than simplicity. Chunks may be lost if ground station buffer
+  // fills.
   if (!state.fileSystemReady) {
     Serial.println(F("Cannot download: file system not ready"));
     return;
   }
 
+  // Take filesystem mutex to prevent concurrent access with CSV logger
+  if (xSemaphoreTake(filesystemMutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+    Serial.println(F("Cannot download: filesystem busy"));
+    return;
+  }
+
   if (!LittleFS.exists(state.csvFileName)) {
     Serial.println(F("Cannot download: flight log does not exist"));
+    xSemaphoreGive(filesystemMutex);
     return;
   }
 
   File csvFile = LittleFS.open(state.csvFileName, "r");
   if (!csvFile) {
     Serial.println(F("Cannot download: failed to open flight log"));
+    xSemaphoreGive(filesystemMutex);
     return;
   }
 
@@ -495,6 +609,7 @@ void handleFileDownload() {
   }
 
   csvFile.close();
+  xSemaphoreGive(filesystemMutex);
   Serial.printf("Download complete: %d chunks, %d bytes sent\n", sequenceNumber,
                 totalBytesSent);
 }
@@ -502,6 +617,12 @@ void handleFileDownload() {
 void handleTruncateLog() {
   if (!state.fileSystemReady) {
     Serial.println(F("Cannot truncate: file system not ready"));
+    return;
+  }
+
+  // Take filesystem mutex to prevent concurrent access with CSV logger
+  if (xSemaphoreTake(filesystemMutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+    Serial.println(F("Cannot truncate: filesystem busy"));
     return;
   }
 
@@ -516,8 +637,11 @@ void handleTruncateLog() {
     Serial.println(F("Flight log recreated with CSV header"));
   } else {
     Serial.println(F("Failed to recreate flight log"));
+    xSemaphoreGive(filesystemMutex);
     return;
   }
+
+  xSemaphoreGive(filesystemMutex);
 
   // Re-enable CSV logging in case it was disabled
   state.csvLoggingEnabled = true;

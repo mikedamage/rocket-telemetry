@@ -108,6 +108,7 @@ void processSerialCommand(const char *command) {
     // Local command - show statistics
     logDebug("Telemetry packets received: %lu", getTelemetryReceivedCount());
     logDebug("Commands sent: %lu", getCommandsSentCount());
+    logDebug("Queue overflows: %lu", getQueueOverflowCount());
   } else if (cmd.startsWith("LOCAL")) {
     // Handle LOCAL status command (compatibility)
     if (cmd.indexOf("STATUS") >= 0) {
